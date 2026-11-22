@@ -67,6 +67,18 @@ function resultsFrom(reply) {
 }
 
 /**
+ * How many people completed it, if the reply says. Flashpoint writes
+ * "**1 complete** (completion rate: 100% …)" or "0 completes". Null when the
+ * reply does not say — unknown is not the same as zero.
+ */
+function completesFrom(reply) {
+  const text = textOf(reply);
+  const n = text.match(/\b(\d+)\**\s+completes?\b/i);
+  if (n) return Number(n[1]);
+  return resultsFrom(reply).empty ? 0 : null;
+}
+
+/**
  * Did the surveys agent say the invitations went out? Checked directly for
  * the same reason as publishing: a run that claims "sent" must have sent.
  */
@@ -113,7 +125,7 @@ function idsFrom(reply, current = {}) {
 }
 
 // Exported for the regression test, which replays real Flashpoint replies.
-export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom };
+export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom, completesFrom };
 
 export class ResearchAgent {
   constructor({ objective, audience, emails, budget, maxRounds, send, log, say }) {
@@ -270,17 +282,29 @@ export class ResearchAgent {
     let distributed = false;
     if (this.send && this.emails.length > 0) {
       this.say?.(`  sending to ${this.emails.length} recipients…`);
+      // A later round looks the panel up by name, but that lookup has never
+      // been exercised on a real run — so it carries its own fallback. If the
+      // name cannot be found, Flashpoint may recreate it from the same list;
+      // one panel under one name, never two.
       const ask = this.panelCreated
         ? [
             `Send this survey to the existing first-party panel named "${this.panelName}" — the same people as the last round.`,
-            "Do not create a new panel, do not add anyone, and do not buy any paid respondents.",
+            `If no panel by that name exists, create it from exactly these addresses: ${this.emails.join(", ")}.`,
+            "Never create a second panel with that name, do not add anyone, and do not buy any paid respondents.",
           ]
         : [
             `Create a first-party panel named "${this.panelName}" from exactly these email addresses and send them this survey now:`,
             this.emails.join(", "),
             "Do not add anyone else and do not buy any paid respondents.",
           ];
-      const sentReply = await this.converse(ask.join("\n"), `send the round ${roundNumber} survey to the list`, {
+      // The goal names the panel, and names creating it as allowed only when
+      // it is missing. The judge is fenced to its goal and told never to
+      // create panels it was not asked for, so without this the fallback
+      // above would be refused by the agent's own guard rail.
+      const goal = this.panelCreated
+        ? `send the round ${roundNumber} survey to the panel "${this.panelName}" (create it from the list only if it does not exist)`
+        : `create the panel "${this.panelName}" from the list and send it the round ${roundNumber} survey`;
+      const sentReply = await this.converse(ask.join("\n"), goal, {
         maxTurns: TURNS.distribute,
         isDone: (reply) => sentFrom(reply).sent,
       });
@@ -305,17 +329,7 @@ export class ResearchAgent {
       await sleep(waitMs);
     }
 
-    this.say?.("  collecting results…");
-    const results = await this.converse(
-      "Give me the results of this survey so far: every question, the counts and percentages for each answer, every free-text response, and the number of completes. If nobody has answered yet, say exactly that.",
-      `collect the round ${roundNumber} results`,
-      { maxTurns: TURNS.collect, isDone: (reply) => resultsFrom(reply).answered },
-    );
-
-    // The analysis reads what the surveys agent wrote, not its envelope.
-    const analysis = await this.brain.analyse(this.objective, roundNumber, textOf(results));
-    this.say?.(`  read them: ${analysis.reasoning}`);
-    (analysis.findings ?? []).forEach((f) => this.say?.(`    • ${f}`));
+    const { completes, analysis } = await this.collectAndRead(roundNumber);
 
     const round = {
       round: roundNumber,
@@ -323,9 +337,46 @@ export class ResearchAgent {
       survey_url: published.live ? published.url : null,
       survey_id: this.ids.surveyId,
       distributed,
+      completes,
       analysis,
     };
     this.history.push(round);
+    await this.log?.({ type: "round", ...round });
+    return round;
+  }
+
+  /** Ask for the current survey's results and decide what they mean. */
+  async collectAndRead(roundNumber) {
+    this.say?.("  collecting results…");
+    const results = await this.converse(
+      "Give me the results of this survey so far: every question, the counts and percentages for each answer, every free-text response, and the number of completes. If nobody has answered yet, say exactly that.",
+      `collect the round ${roundNumber} results`,
+      { maxTurns: TURNS.collect, isDone: (reply) => resultsFrom(reply).answered },
+    );
+    const completes = completesFrom(results);
+    if (completes !== null) this.say?.(`  ${completes} complete${completes === 1 ? "" : "s"}`);
+
+    // The analysis reads what the surveys agent wrote, not its envelope, and
+    // sees what earlier rounds found so it can say what this one changed.
+    const analysis = await this.brain.analyse(this.objective, roundNumber, textOf(results), this.history);
+    this.say?.(`  read them: ${analysis.reasoning}`);
+    (analysis.findings ?? []).forEach((f) => this.say?.(`    • ${f}`));
+    return { completes, analysis };
+  }
+
+  /**
+   * Nobody has answered. Wait once more and read the same survey again,
+   * rather than writing a "follow-up" to answers that do not exist and
+   * emailing the same people a second time.
+   */
+  async waitAgain(round) {
+    const waitMs = Number(process.env.WAIT_MS ?? 120000);
+    this.say?.(`\n  nobody has answered yet. A follow-up built on nothing would only mail the same people twice,`);
+    this.say?.(`  so the agent waits another ${Math.round(waitMs / 1000)}s and reads the same survey again.`);
+    await this.log?.({ type: "decision", stage: "wait-again", round: round.round, reason: "zero completes" });
+    await sleep(waitMs);
+    const { completes, analysis } = await this.collectAndRead(round.round);
+    Object.assign(round, { completes, analysis, waited_twice: true });
     await this.log?.({ type: "round", ...round });
     return round;
   }
@@ -339,7 +390,21 @@ export class ResearchAgent {
     let stopped = null;
     try {
       for (let r = 1; r <= this.maxRounds; r++) {
-        const round = await this.runRound(r);
+        let round = await this.runRound(r);
+
+        // Zero answers is not a gap to follow up on; it is silence. Give
+        // people one more window before deciding anything.
+        if (round.distributed && round.completes === 0) round = await this.waitAgain(round);
+        if (round.completes === 0) {
+          this.say?.(
+            round.distributed
+              ? "\n  still no answers. There is nothing to follow up on, so no second survey goes out."
+              : "\n  nothing was sent, so there is nothing to follow up on.",
+          );
+          stopped = "no-responses";
+          break;
+        }
+
         if (round.analysis?.enough_to_answer) {
           this.say?.("\n  the agent says it has enough to answer. Stopping early.");
           stopped = "answered";

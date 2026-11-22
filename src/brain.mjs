@@ -164,20 +164,38 @@ export class Brain {
   }
 
   /** Read the results and say honestly whether they settle anything. */
-  async analyse(objective, round, results) {
+  async analyse(objective, round, results, history = []) {
+    // Earlier rounds, compressed to what they found, so this round can say
+    // what it confirmed or overturned instead of being read in isolation.
+    const earlier = history.map((r) => ({
+      round: r.round,
+      asked: r.plan?.title,
+      completes: r.completes ?? null,
+      findings: r.analysis?.findings ?? [],
+      gaps: r.analysis?.gaps ?? [],
+    }));
     const prompt = [
       "You are a research agent reading back the results of a survey you designed yourself.",
       "Be strict. Small samples do not support confident claims, and you must say so.",
       "",
       `OBJECTIVE: ${objective}`,
       `ROUND: ${round}`,
-      "RESULTS:",
+      ...(earlier.length
+        ? ["WHAT EARLIER ROUNDS FOUND:", JSON.stringify(earlier, null, 2), ""]
+        : []),
+      // Without this the reasoning-only fence makes it distrust numbers it
+      // cannot look up itself: a real run hedged every figure as "needs to be
+      // re-fetched". These are the fetched figures.
+      "RESULTS — fetched from Flashpoint moments ago. They are the real data; rely on the numbers as given:",
       typeof results === "string" ? results : JSON.stringify(results, null, 2),
       "",
       "Reply with JSON only:",
       "{",
       '  "findings": ["<specific thing the data shows, with the number attached>"],',
       '  "surprises": ["<anything that contradicts what you assumed when you wrote the questions>"],',
+      ...(earlier.length
+        ? ['  "changed_since_last_round": "<what this round confirmed or overturned from earlier rounds>",']
+        : []),
       '  "gaps": ["<what you still cannot answer, and why>"],',
       '  "enough_to_answer": true|false,',
       '  "reasoning": "<2-3 sentences justifying that true or false>"',
