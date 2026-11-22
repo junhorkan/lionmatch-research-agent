@@ -100,8 +100,12 @@ function sentFrom(reply) {
   const said =
     /\b(?:sent|emailed|delivered|dispatched)\b|invitations? (?:went|are|have gone) out|\bon (?:its|their) way\b|queued for delivery/i.test(text);
   // "will be sent" is a promise, not a send.
+  // A denial anywhere outranks every "sent" below: "Nothing has been sent yet"
+  // contains "has been sent", and once read as a definite send.
   const failed =
-    /\b(?:failed to send|could not send|unable to send|not (?:yet )?(?:been )?sent|nothing (?:was )?sent)\b|\b(?:will|would|is going to) be (?:sent|emailed|delivered)\b|\bto be sent\b/i.test(text);
+    /\b(?:failed to send|could not send|unable to send|nothing (?:was )?sent)\b|\b(?:will|would|is going to) be (?:sent|emailed|delivered)\b|\bto be sent\b/i.test(text) ||
+    /(?:\bnot|\bnever|n't)\s+(?:yet\s+)?(?:been\s+)?(?:sent|emailed|delivered|dispatched)\b/i.test(text) ||
+    /\b(?:nothing|no(?:\s+[a-z]+){0,2}?)\s+(?:has|have|was|were|is|are)\s+(?:yet\s+)?(?:been\s+)?(?:sent|emailed|delivered|dispatched)\b/i.test(text);
   // A plain statement that it already went out wins over a confirm request
   // for something else ("on its way — reply confirm to send a reminder").
   const definite = /\bon (?:its|their) way\b|\b(?:has|have) been (?:sent|emailed|delivered)\b|\b(?:was|were) (?:sent|emailed|delivered|dispatched)\b|queued for delivery/i.test(text);
@@ -121,7 +125,8 @@ function asksToConfirm(text) {
   // A request, not a mention: "I will confirm once responses arrive" is not
   // waiting on us. An earlier version matched any "confirm" and would have
   // read a real send as unsent.
-  return /\b(?:reply|type|say|respond|answer)\s+(?:with\s+)?[*_]*\s*["“'‘]?\s*confirm\b|\bplease confirm\b|\bconfirm (?:one more time|again|to (?:send|publish|proceed))\b|(?:awaiting|need|needs|requires?)\s+(?:your\s+)?confirmation|\bonce you (?:reply|respond|confirm)\b|\bwhen you confirm\b|\bto proceed\b/i.test(
+  // A question asking permission ("shall I go ahead?") is the same wait.
+  return /\b(?:reply|type|say|respond|answer)\s+(?:with\s+)?[*_]*\s*["“'‘]?\s*confirm\b|\bplease confirm\b|\bconfirm (?:one more time|again|to (?:send|publish|proceed))\b|(?:awaiting|need|needs|requires?)\s+(?:your\s+)?confirmation|\bonce you (?:reply|respond|confirm)\b|\bwhen you confirm\b|\bto proceed\b|\b(?:shall|should) I\b|\b(?:do you want|would you like) me to\b/i.test(
     text,
   );
 }
@@ -142,7 +147,11 @@ function publishedFrom(reply) {
   // "is live" said outright wins over a confirm request for a later step
   // ("is live — reply confirm to email it"). "will make it live" is not that.
   const definite = /\b(?:is|it's|is now|now) live\b|\bhas been published\b|\bis published\b/i.test(text);
-  return { url, live: Boolean(url) && (definite || !asksToConfirm(text)) };
+  // A draft link is still a link. "It is not live yet" must never pass, even
+  // with no confirm request beside it, or people get mailed a dead survey.
+  const denied =
+    /(?:\bnot|\bnever|n't)\s+(?:yet\s+)?(?:been\s+)?(?:live|published)\b|\bunpublished\b|\b(?:is|it's) (?:still )?(?:a |in )?draft\b/i.test(text);
+  return { url, live: Boolean(url) && !denied && (definite || !asksToConfirm(text)) };
 }
 
 function idsFrom(reply, current = {}) {
