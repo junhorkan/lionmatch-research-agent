@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ResearchAgent } from "./src/agent.mjs";
-import { balance, wallet } from "./src/flashpoint.mjs";
+import { balance, redact, wallet } from "./src/flashpoint.mjs";
 
 function args(argv) {
   const out = { _: [] };
@@ -71,10 +71,15 @@ fs.mkdirSync(dir, { recursive: true });
 const logPath = path.join(dir, "log.jsonl");
 const stream = fs.createWriteStream(logPath, { flags: "a" });
 
+// Every byte the run writes — the log, the screen, the write-up — passes
+// through one of these, so addresses are masked here rather than wherever
+// someone remembered to. Masking field by field leaked: the brain's own
+// notes repeated an address it had read ("ready to send to …"), and notes
+// were never on the list. On a live demo the screen is shared too.
 const log = async (entry) => {
-  stream.write(`${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
+  stream.write(`${JSON.stringify(redact({ at: new Date().toISOString(), ...entry }))}\n`);
 };
-const say = (line) => console.log(line);
+const say = (line) => console.log(redact(line));
 
 const address = wallet().address;
 let opening = null;
@@ -188,7 +193,7 @@ const md = [
   "",
 ].filter((l) => l !== "").join("\n");
 
-fs.writeFileSync(path.join(dir, "RUN.md"), md);
+fs.writeFileSync(path.join(dir, "RUN.md"), redact(md));
 stream.end();
 
 say("");

@@ -90,8 +90,12 @@ const TIMEOUT_MS = {
 // writes up what it learned, rather than crashing.
 export class FlashpointTimeout extends FlashpointError {}
 
-/** Email addresses belong to other people. They never reach a log file. */
-function redact(args) {
+/**
+ * Email addresses belong to other people. They never reach a log file, the
+ * write-up, or the screen. Exported so run.mjs can apply it to everything on
+ * its way out; idempotent, since a masked address has no "@" left to match.
+ */
+export function redact(args) {
   const scrub = (v) =>
     typeof v === "string"
       ? v.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, (hit) => `<address at ${hit.split("@")[1]}>`)
