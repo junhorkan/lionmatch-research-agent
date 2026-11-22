@@ -72,7 +72,8 @@ function resultsFrom(reply) {
  */
 function sentFrom(reply) {
   const text = textOf(reply);
-  const said = /\b(?:sent|emailed|delivered)\b|invitations? (?:went|are|have gone) out/i.test(text);
+  // "on its way" is Flashpoint's actual wording on a real send.
+  const said = /\b(?:sent|emailed|delivered)\b|invitations? (?:went|are|have gone) out|\bon (?:its|their) way\b/i.test(text);
   const failed = /\b(?:failed to send|could not send|unable to send|not (?:yet )?(?:been )?sent|nothing (?:was )?sent)\b/i.test(text);
   return { sent: said && !failed && !asksToConfirm(text) };
 }
@@ -127,7 +128,10 @@ export class ResearchAgent {
     this.brain = new Brain({ flashpoint: this.flashpoint, log });
     this.history = [];
     this.ids = { conversationId: null, surveyId: null };
-    this.panelId = null;
+    // Unique per run, so round 2 can find round 1's panel by name and two
+    // runs never share one.
+    this.panelName = `flashpoint-agent ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+    this.panelCreated = false;
     this.lastExchangeDone = false;
   }
 
@@ -259,17 +263,20 @@ export class ResearchAgent {
     //
     // Round 1 builds a panel from the list. Later rounds send to that same
     // panel: building a second one from the same addresses would put every
-    // person on two panels and mail them twice.
+    // person on two panels and mail them twice. Flashpoint never returns a
+    // panel id in its replies (checked on a real send: only conversation,
+    // task and survey ids come back), so the panel is given a unique name
+    // when it is created and asked for by that name afterwards.
     let distributed = false;
     if (this.send && this.emails.length > 0) {
       this.say?.(`  sending to ${this.emails.length} recipients…`);
-      const ask = this.panelId
+      const ask = this.panelCreated
         ? [
-            `Send this survey to the existing first-party panel ${this.panelId} — the same people as the last round.`,
+            `Send this survey to the existing first-party panel named "${this.panelName}" — the same people as the last round.`,
             "Do not create a new panel, do not add anyone, and do not buy any paid respondents.",
           ]
         : [
-            "Create a first-party panel from exactly these email addresses and send them this survey now:",
+            `Create a first-party panel named "${this.panelName}" from exactly these email addresses and send them this survey now:`,
             this.emails.join(", "),
             "Do not add anyone else and do not buy any paid respondents.",
           ];
@@ -277,13 +284,16 @@ export class ResearchAgent {
         maxTurns: TURNS.distribute,
         isDone: (reply) => sentFrom(reply).sent,
       });
-      this.panelId ??= idsFrom(sentReply).panelId;
 
       // "Sent" is a claim that ends up in the write-up, so it has to be true.
       // The conversation ending is not evidence that mail went out.
       distributed = sentFrom(sentReply).sent || this.lastExchangeDone;
-      if (distributed) this.say?.(`  sent${this.panelId ? ` (panel ${this.panelId})` : ""}`);
-      else this.say?.("  could not confirm anything was sent — not waiting, and saying so in the write-up");
+      if (distributed) {
+        this.panelCreated = true;
+        this.say?.(`  sent (panel "${this.panelName}")`);
+      } else {
+        this.say?.("  could not confirm anything was sent — not waiting, and saying so in the write-up");
+      }
     } else {
       this.say?.(this.send ? "  no recipients given, not sending" : "  dry run: not sending");
     }
