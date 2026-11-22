@@ -86,15 +86,27 @@ function completesFrom(reply) {
  */
 function sentFrom(reply) {
   const text = textOf(reply);
-  // "on its way" is Flashpoint's actual wording on a real send.
-  const said = /\b(?:sent|emailed|delivered)\b|invitations? (?:went|are|have gone) out|\bon (?:its|their) way\b/i.test(text);
-  const failed = /\b(?:failed to send|could not send|unable to send|not (?:yet )?(?:been )?sent|nothing (?:was )?sent)\b/i.test(text);
+  // "on its way" is Flashpoint's actual wording on a real send; "dispatched"
+  // and "queued for delivery" mean the same and once read as not sent.
+  const said =
+    /\b(?:sent|emailed|delivered|dispatched)\b|invitations? (?:went|are|have gone) out|\bon (?:its|their) way\b|queued for delivery/i.test(text);
+  // "will be sent" is a promise, not a send.
+  const failed =
+    /\b(?:failed to send|could not send|unable to send|not (?:yet )?(?:been )?sent|nothing (?:was )?sent)\b|\b(?:will|would|is going to) be (?:sent|emailed|delivered)\b|\bto be sent\b/i.test(text);
   return { sent: said && !failed && !asksToConfirm(text) };
 }
 
-/** Is it asking us to say "confirm"? Flashpoint gates publishing on it. */
+/**
+ * Is it still waiting on us to say "confirm"? Flashpoint gates publishing
+ * and sending on it, twice each.
+ *
+ * Any request to confirm counts, however it is quoted: the real replies used
+ * **confirm** and "confirm", but 'confirm', "when you confirm" and "once you
+ * reply" mean the same thing. Missing one let "It will be sent once you reply
+ * 'confirm'" read as sent. "confirmed" (past tense) does not count.
+ */
 function asksToConfirm(text) {
-  return /reply\s*\**\s*["“]?confirm|type\s*["“]?confirm|please confirm|confirm one more time|to proceed/i.test(text);
+  return /\bconfirm\b|awaiting (?:your )?confirmation|needs? (?:your )?confirmation|once you (?:reply|respond)|to proceed/i.test(text);
 }
 
 /**
@@ -338,25 +350,34 @@ export class ResearchAgent {
       this.say?.(this.send ? "  no recipients given, not sending" : "  dry run: not sending");
     }
 
-    // Wait for answers, then read them.
-    if (distributed) {
-      const waitMs = Number(process.env.WAIT_MS ?? 120000);
-      this.say?.(`  waiting ${Math.round(waitMs / 1000)}s for responses…`);
-      await sleep(waitMs);
-    }
-
-    const { completes, analysis } = await this.collectAndRead(roundNumber, this.history);
-
+    // Record the round now, before reading anything. It was published and
+    // perhaps mailed; if collecting or analysing then fails, it must still
+    // appear in RUN.md and in what the recommendation sees. It used to be
+    // added only at the very end, so a failure there erased it.
+    const earlier = [...this.history];
     const round = {
       round: roundNumber,
       plan,
       survey_url: published.live ? published.url : null,
       survey_id: this.ids.surveyId,
       distributed,
-      completes,
-      analysis,
+      not_sent_because: distributed ? null : !this.send || this.emails.length === 0 ? "dry run" : !published.live ? "not live" : "unconfirmed",
+      completes: null,
+      analysis: null,
     };
     this.history.push(round);
+    await this.log?.({ type: "round", ...round });
+
+    // Nobody was asked, so there is nothing to collect: reading an empty
+    // survey cost about $0.52 and said nothing.
+    if (!distributed) return round;
+
+    const waitMs = Number(process.env.WAIT_MS ?? 120000);
+    this.say?.(`  waiting ${Math.round(waitMs / 1000)}s for responses…`);
+    await sleep(waitMs);
+
+    const { completes, analysis } = await this.collectAndRead(roundNumber, earlier);
+    Object.assign(round, { completes, analysis });
     await this.log?.({ type: "round", ...round });
     return round;
   }
@@ -374,7 +395,9 @@ export class ResearchAgent {
 
     // The analysis reads what the surveys agent wrote, not its envelope, and
     // sees what earlier rounds found so it can say what this one changed.
-    const analysis = await this.brain.analyse(this.objective, roundNumber, textOf(results), earlier);
+    // Masked: a respondent can type their own address into a free-text answer,
+    // and the reasoning backend has no need of it.
+    const analysis = await this.brain.analyse(this.objective, roundNumber, redact(textOf(results)), earlier);
     this.say?.(`  read them: ${analysis.reasoning}`);
     (analysis.findings ?? []).forEach((f) => this.say?.(`    • ${f}`));
     return { completes, analysis };

@@ -29,38 +29,87 @@ check("no run folder left behind", fs.readdirSync(runsDir).length === before);
 // 2. A tool that fails inside a successful response is a failure, and it was
 //    still paid for. Real case: "Error executing tool chat: orchestrator did
 //    not reply within 300.0s" used to be parsed as an answer.
-function fakeFlashpoint(body, { receipt = true } = {}) {
+// `bodies` is what each successive call returns; the last one repeats.
+function fakeFlashpoint(bodies, { receipt = true } = {}) {
   const fp = new Flashpoint({ budget: 1, log: async () => {} });
+  let n = 0;
   fp.connect = async () => ({
     headers: {},
-    paidFetch: async () =>
-      new Response(JSON.stringify(body), {
+    paidFetch: async () => {
+      const body = bodies[Math.min(n++, bodies.length - 1)];
+      return new Response(JSON.stringify(body), {
         status: 200,
         headers: receipt
           ? { "payment-response": Buffer.from(JSON.stringify({ transaction: "0xabc", network: "eip155:8453" })).toString("base64") }
           : {},
-      }),
+      });
+    },
   });
+  fp.attempts = () => n;
   return fp;
 }
+const ok = (obj) => ({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(obj) }] } });
+const isError = { jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: "Error executing tool chat: orchestrator did not reply within 300.0s" }] } };
+
 for (const [label, body] of [
-  ["MCP isError", { jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: "Error executing tool chat: orchestrator did not reply within 300.0s" }] } }],
-  ["status failed", { jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ status: "failed", error: "surveys agent crashed" }) }] } }],
+  ["MCP isError", isError],
+  ["status failed", ok({ status: "failed", error: "surveys agent crashed" })],
+  ["status cancelled", ok({ status: "cancelled" })],
 ]) {
-  const fp = fakeFlashpoint(body);
+  const fp = fakeFlashpoint([body]);
   let threw = null;
   try {
     await fp.call("chat", { message: "x" }, "test");
   } catch (e) {
     threw = e;
   }
-  check(`${label}: raises`, threw instanceof FlashpointError, threw?.message?.slice(0, 50));
-  check(`${label}: still charged`, Math.abs(fp.spentUsd - 0.01) < 1e-9, `spent $${fp.spentUsd}`);
+  check(`${label}: raises after one retry`, threw instanceof FlashpointError && fp.attempts() === 2, `${fp.attempts()} tries`);
+  check(`${label}: both tries charged`, Math.abs(fp.spentUsd - 0.02) < 1e-9, `spent $${fp.spentUsd}`);
 }
 {
-  const fp = fakeFlashpoint({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ reply: "fine", error: null, status: "completed" }) }] } });
+  // Transient: fails once, then answers. One error used to end the run.
+  const fp = fakeFlashpoint([isError, ok({ reply: "recovered" })]);
   const out = await fp.call("chat", { message: "x" }, "test");
-  check("a normal reply with error:null is not a failure", out?.reply === "fine");
+  check("a transient tool error is retried and recovers", out?.reply === "recovered" && fp.attempts() === 2);
+}
+for (const [label, body] of [
+  ["error:null", ok({ reply: "fine", error: null, status: "completed" })],
+  ["error:{}", ok({ reply: "fine", error: {}, status: "completed" })],
+  ['error:""', ok({ reply: "fine", error: "", status: "completed" })],
+]) {
+  const fp = fakeFlashpoint([body]);
+  const out = await fp.call("chat", { message: "x" }, "test");
+  check(`a normal reply with ${label} is not a failure`, out?.reply === "fine" && fp.attempts() === 1);
+}
+
+// 2b. A round that was sent must survive a failure while reading it, and
+//     still appear in the write-up. It used to be recorded only at the end.
+{
+  const { renderRun } = await import("../src/report.mjs");
+  const agent = new ResearchAgent({
+    objective: "x", audience: "x", emails: ["someone@example.com"], budget: 10, maxRounds: 1, send: true,
+    log: async () => {}, say: () => {},
+  });
+  process.env.WAIT_MS = "0";
+  const live = { result: { final_text: "The survey is live: flashpointopinions.com/170d47ff-104b-4f59-b013-4eb8355a8d70" } };
+  const sent = { result: { final_text: "Invitation is on its way to 1 person." } };
+  agent.brain.planFirstRound = async () => ({ title: "T", reasoning: "R", questions: [{ text: "Q?", type: "single" }] });
+  agent.brain.recommend = async () => ({ recommendation: "x", confidence: "low" });
+  let call = 0;
+  agent.converse = async () => {
+    call++;
+    if (call === 1) return live;
+    if (call === 2) {
+      agent.lastExchangeDone = true;
+      return sent;
+    }
+    throw new FlashpointError("collect failed: orchestrator did not reply");
+  };
+  const out = await agent.run();
+  const r = out.rounds[0];
+  check("sent round kept after reading fails", out.rounds.length === 1 && r?.distributed === true && r.analysis === null);
+  const md = renderRun({ summary: out, stamp: "t", send: true });
+  check("write-up says it was sent but never read", /Sent to the list\./.test(md) && /never read/.test(md));
 }
 
 // 3. A few cents are held back so the recommendation can always be written.

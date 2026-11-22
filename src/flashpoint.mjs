@@ -89,6 +89,9 @@ const TIMEOUT_MS = {
 // A FlashpointError, so the agent's run loop stops gracefully on it and still
 // writes up what it learned, rather than crashing.
 export class FlashpointTimeout extends FlashpointError {}
+// The tool answered, but with a failure. Transient often enough ("the
+// orchestrator did not reply within 300s") to be worth one retry.
+export class FlashpointToolError extends FlashpointError {}
 
 /**
  * Email addresses belong to other people. They never reach a log file, the
@@ -190,10 +193,16 @@ export class Flashpoint {
         return await this.#attempt(name, args, attempt === 1 ? why : `${why} — retry after timeout`, limit);
       } catch (error) {
         const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
-        if (!timedOut) throw error;
-        await this.log?.({ type: "timeout", tool: name, attempt, afterSeconds: limit / 1000 });
+        // Making tool failures raise meant one transient error ended the run,
+        // since nothing retried them. They get the same single retry as a
+        // timeout. It is paid again, but a budget stop is still a stop.
+        const toolFailed = error instanceof FlashpointToolError;
+        if (!timedOut && !toolFailed) throw error;
+        if (timedOut) await this.log?.({ type: "timeout", tool: name, attempt, afterSeconds: limit / 1000 });
         if (attempt === 2) {
-          throw new FlashpointTimeout(`${name} did not answer within ${limit / 1000}s on two tries.`);
+          throw toolFailed
+            ? error
+            : new FlashpointTimeout(`${name} did not answer within ${limit / 1000}s on two tries.`);
         }
         // A session can die without saying so. Retry on a fresh one.
         this.session = null;
@@ -272,15 +281,21 @@ export class Flashpoint {
     // back "Error executing tool chat: orchestrator did not reply within
     // 300.0s" and was parsed as if it were an answer. It was still paid for —
     // the charge above stands — but it is a failure, not a reply.
-    const failure =
-      message.result?.isError
-        ? String(payload ?? "tool reported an error")
-        : result && typeof result === "object" && (result.error || result.status === "failed")
-          ? String(result.error?.message ?? result.error ?? "tool reported status failed")
-          : null;
+    // An error field only counts if it says something: real replies carry
+    // "error": null, and an empty {} or "" is not a failure.
+    const said = (e) =>
+      typeof e === "string" ? e.trim() : e && typeof e === "object" && Object.keys(e).length ? (e.message ?? JSON.stringify(e)) : "";
+    const failure = message.result?.isError
+      ? String(payload ?? "tool reported an error")
+      : result && typeof result === "object"
+        ? said(result.error) ||
+          (["failed", "error", "cancelled", "canceled"].includes(String(result.status ?? "").toLowerCase())
+            ? `tool reported status ${result.status}`
+            : null)
+        : null;
     if (failure) {
-      await this.log?.({ type: "tool-error", tool: name, price, receipt, problem: failure.slice(0, 300) });
-      throw new FlashpointError(`${name} failed: ${failure.slice(0, 200)}`);
+      await this.log?.({ type: "tool-error", tool: name, price, receipt, problem: String(failure).slice(0, 300) });
+      throw new FlashpointToolError(`${name} failed: ${String(failure).slice(0, 200)}`);
     }
 
     // The surveys agent echoes panel membership back at us, so a raw result
