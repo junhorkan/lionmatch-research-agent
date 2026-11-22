@@ -1,0 +1,15 @@
+{
+  "name": "flashpoint-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Give it one objective. It designs the research, runs it, learns, and answers.",
+  "scripts": {
+    "start": "node run.mjs"
+  },
+  "dependencies": {
+    "@x402/evm": "^2.32.0",
+    "@x402/fetch": "^2.32.0",
+    "undici": "^8.13.1",
+    "viem": "^2.58.4"
+  }
+}
