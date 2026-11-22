@@ -67,6 +67,18 @@ for (const [label, body] of [
   check(`${label}: both tries charged`, Math.abs(fp.spentUsd - 0.02) < 1e-9, `spent $${fp.spentUsd}`);
 }
 {
+  // A send must never be retried blindly: if the first try went out and then
+  // failed, a retry would mail everyone twice.
+  const fp = fakeFlashpoint([isError, ok({ reply: "would be a second send" })]);
+  let threw = null;
+  try {
+    await fp.call("tool_survey", { brief: "send" }, "send", { retry: false });
+  } catch (e) {
+    threw = e;
+  }
+  check("retry:false makes exactly one attempt", threw instanceof FlashpointError && fp.attempts() === 1, `${fp.attempts()} tries`);
+}
+{
   // Transient: fails once, then answers. One error used to end the run.
   const fp = fakeFlashpoint([isError, ok({ reply: "recovered" })]);
   const out = await fp.call("chat", { message: "x" }, "test");

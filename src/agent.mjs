@@ -93,7 +93,10 @@ function sentFrom(reply) {
   // "will be sent" is a promise, not a send.
   const failed =
     /\b(?:failed to send|could not send|unable to send|not (?:yet )?(?:been )?sent|nothing (?:was )?sent)\b|\b(?:will|would|is going to) be (?:sent|emailed|delivered)\b|\bto be sent\b/i.test(text);
-  return { sent: said && !failed && !asksToConfirm(text) };
+  // A plain statement that it already went out wins over a confirm request
+  // for something else ("on its way — reply confirm to send a reminder").
+  const definite = /\bon (?:its|their) way\b|\b(?:has|have) been (?:sent|emailed|delivered)\b|\b(?:was|were) (?:sent|emailed|delivered|dispatched)\b|queued for delivery/i.test(text);
+  return { sent: !failed && (definite || (said && !asksToConfirm(text))) };
 }
 
 /**
@@ -106,7 +109,12 @@ function sentFrom(reply) {
  * 'confirm'" read as sent. "confirmed" (past tense) does not count.
  */
 function asksToConfirm(text) {
-  return /\bconfirm\b|awaiting (?:your )?confirmation|needs? (?:your )?confirmation|once you (?:reply|respond)|to proceed/i.test(text);
+  // A request, not a mention: "I will confirm once responses arrive" is not
+  // waiting on us. An earlier version matched any "confirm" and would have
+  // read a real send as unsent.
+  return /\b(?:reply|type|say|respond|answer)\s+(?:with\s+)?[*_]*\s*["“'‘]?\s*confirm\b|\bplease confirm\b|\bconfirm (?:one more time|again|to (?:send|publish|proceed))\b|(?:awaiting|need|needs|requires?)\s+(?:your\s+)?confirmation|\bonce you (?:reply|respond|confirm)\b|\bwhen you confirm\b|\bto proceed\b/i.test(
+    text,
+  );
 }
 
 /**
@@ -122,7 +130,10 @@ function publishedFrom(reply) {
   const text = textOf(reply);
   const hit = text.match(/(?:https?:\/\/)?flashpointopinions\.com\/([0-9a-f-]{36})/i);
   const url = hit ? `https://flashpointopinions.com/${hit[1]}` : null;
-  return { url, live: Boolean(url) && !asksToConfirm(text) };
+  // "is live" said outright wins over a confirm request for a later step
+  // ("is live — reply confirm to email it"). "will make it live" is not that.
+  const definite = /\b(?:is|it's|is now|now) live\b|\bhas been published\b|\bis published\b/i.test(text);
+  return { url, live: Boolean(url) && (definite || !asksToConfirm(text)) };
 }
 
 function idsFrom(reply, current = {}) {
@@ -175,7 +186,7 @@ export class ResearchAgent {
    * it pushed back — goes to the brain, which decides what to say. That is
    * where the agent is holding the conversation rather than replaying one.
    */
-  async converse(firstMessage, goal, { fresh = false, maxTurns = TURNS.build, isDone = null, nothingIsAnAnswer = false } = {}) {
+  async converse(firstMessage, goal, { fresh = false, maxTurns = TURNS.build, isDone = null, nothingIsAnAnswer = false, retry = true } = {}) {
     let message = firstMessage;
     let last = null;
     this.lastExchangeDone = false;
@@ -186,7 +197,7 @@ export class ResearchAgent {
       if (ids.conversationId) args.conversation_id = ids.conversationId;
       if (ids.surveyId) args.survey_id = ids.surveyId;
 
-      last = await this.flashpoint.call("tool_survey", args, `${goal} (turn ${turn})`);
+      last = await this.flashpoint.call("tool_survey", args, `${goal} (turn ${turn})`, { retry });
       Object.assign(ids, idsFrom(last, ids));
       this.ids = ids;
       const said = textOf(last);
@@ -326,10 +337,36 @@ export class ResearchAgent {
       const goal = this.panelCreated
         ? `send the round ${roundNumber} survey to the panel "${this.panelName}" (create it from the list only if it does not exist)`
         : `create the panel "${this.panelName}" from the list and send it the round ${roundNumber} survey`;
-      const sentReply = await this.converse(ask.join("\n"), goal, {
-        maxTurns: TURNS.distribute,
-        isDone: (reply) => sentFrom(reply).sent,
-      });
+      // Sending is the one step that must never be repeated blindly: a send
+      // that went out and then timed out would, retried, mail everyone twice.
+      // So no automatic retry here. If it fails, ask whether it already went
+      // out, and only then send — and if even that fails, record the round as
+      // unconfirmed rather than guess.
+      let sentReply = null;
+      try {
+        sentReply = await this.converse(ask.join("\n"), goal, {
+          maxTurns: TURNS.distribute,
+          isDone: (reply) => sentFrom(reply).sent,
+          retry: false,
+        });
+      } catch (error) {
+        if (error instanceof BudgetExhausted) throw error;
+        this.say?.("  the send step failed part-way; asking whether it already went out before doing anything else");
+        await this.log?.({ type: "send-check", round: roundNumber, problem: error.message });
+        try {
+          sentReply = await this.converse(
+            [
+              `Has this survey's invitation already been sent to the panel named "${this.panelName}"?`,
+              "If it has, say so and do nothing else. If it has not, send it now. Never send it twice.",
+            ].join("\n"),
+            `make sure the round ${roundNumber} survey went to the panel "${this.panelName}" exactly once`,
+            { maxTurns: TURNS.distribute, isDone: (reply) => sentFrom(reply).sent, retry: false },
+          );
+        } catch (again) {
+          if (again instanceof BudgetExhausted) throw again;
+          await this.log?.({ type: "send-check", round: roundNumber, problem: again.message, outcome: "unconfirmed" });
+        }
+      }
 
       // "Sent" is a claim that ends up in the write-up, so it has to be true.
       // The conversation ending is not evidence that mail went out.

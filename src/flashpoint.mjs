@@ -186,9 +186,13 @@ export class Flashpoint {
    * Call one tool and pay for it. `why` is the agent's own reason for making
    * this call; it goes in the log so a reader can follow the reasoning.
    */
-  async call(name, args = {}, why = "") {
+  /**
+   * `retry: false` is for calls that must not happen twice. A send that went
+   * out and then timed out would, retried, mail everyone a second time.
+   */
+  async call(name, args = {}, why = "", { retry = true } = {}) {
     const limit = TIMEOUT_MS[name] ?? TIMEOUT_MS.default;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= (retry ? 2 : 1); attempt++) {
       try {
         return await this.#attempt(name, args, attempt === 1 ? why : `${why} — retry after timeout`, limit);
       } catch (error) {
@@ -199,10 +203,10 @@ export class Flashpoint {
         const toolFailed = error instanceof FlashpointToolError;
         if (!timedOut && !toolFailed) throw error;
         if (timedOut) await this.log?.({ type: "timeout", tool: name, attempt, afterSeconds: limit / 1000 });
-        if (attempt === 2) {
+        if (attempt === (retry ? 2 : 1)) {
           throw toolFailed
             ? error
-            : new FlashpointTimeout(`${name} did not answer within ${limit / 1000}s on two tries.`);
+            : new FlashpointTimeout(`${name} did not answer within ${limit / 1000}s${retry ? " on two tries" : ""}.`);
         }
         // A session can die without saying so. Retry on a fresh one.
         this.session = null;
