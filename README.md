@@ -294,6 +294,32 @@ mail. `test/brain-live.mjs` covers analysing and recommending. `test/brain-round
 every reasoning step of a two-round run on the LionMatch objective, using **invented** results that
 are printed and never saved.
 
+### Working on it as a team
+
+Anyone with access to the repo can read, change and test the code. Only a real run costs money.
+
+- **Free: the tests.** `npm install && npm test` runs all eight suites with no key, no wallet and
+  no spending. CI runs the same on every push, and a failing pull request shows a red X.
+- **Not free: running the agent.** `node run.mjs` builds and publishes a real survey even without
+  `--send` (about $2), and with `--send` it emails real people. To try it, put **your own**
+  funded wallet key in **your own** `.env`.
+- **Never share a wallet key.** It is not a login: anyone who has it can move every dollar in the
+  wallet, and that cannot be undone. Do not paste it into chat, a commit, an issue or a text.
+- **`--emails` only lists people who agreed** to get the survey.
+- **Changes go through a pull request, not straight to `main`.**
+
+  ```bash
+  git checkout -b <your-name>-<what-you-changed>
+  # edit, then check nothing broke:
+  npm test
+  git push -u origin <your-name>-<what-you-changed>
+  ```
+
+  Then open a pull request on GitHub. Merge it only when the tests pass and someone else has
+  read it.
+- **Nothing is merged while the judged run is going.** The README has to describe the code that
+  run actually used.
+
 ### How it was built
 
 Every run against the live system surfaced a real failure. Each was fixed and, where possible,
