@@ -10,7 +10,7 @@ two of them are replayed by the regression tests.
 
 | run | what it was | what it showed |
 |---|---|---|
-| _judged run: added after the live kickoff_ | | |
+| [`2026-11-22T18-11-12`](2026-11-22T18-11-12/RUN.md) | **The judged run.** Two rounds, real sends to the list. $7.13 | Wrote both surveys, published and emailed each, read 2 then 1 responses, aimed round 2 at what round 1 left open, and recommended at low confidence. Round 2 was the first live send to the same named panel. |
 | `2026-11-22T01-20-38` | **One-round test, real send to one recipient.** $4.09 | The full loop worked: designed, published, emailed, collected one real answer, and recommended. It declined to generalise from one response. It also leaked the tester's address into the log, which is why masking now happens at the exit; the log here was scrubbed. Replayed by `test/send-detection`. |
 | `2026-11-22T01-09-41` | Dry run. $3.58 | It published, then while collecting tried to borrow a different project's panel. That is why the reasoning backend is now fenced to reasoning only. |
 | `2026-11-22T01-04-17` | Dry run. $2.06 | It published after a four-turn confirm exchange it handled itself, then crashed when the judge answered in prose. That is why facts are now checked in code. Replayed by `test/publish-detection`. |

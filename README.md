@@ -19,6 +19,9 @@ No survey question, analysis or stopping rule is written in this repo. The model
 run time, and code checks the facts its decisions rest on. Nothing in the code is specific to
 LionMatch: the objective is one flag, so the same agent works for any question about any audience.
 
+**See it in action:** [`EXPLAINER.md`](EXPLAINER.md) walks through the judged run step by step,
+with the agent's real screen output.
+
 Team **LionMatch** (Alex, Jun, Max, Peter, Ayan), Columbia AI Club MCP Challenge, judged 22
 November 2026.
 
@@ -326,10 +329,10 @@ Every run against the live system surfaced a real failure. Each was fixed and, w
 pinned with a test that replays the real replies from `runs/`. Three independent reviews of the
 code then tightened what decides "sent", retries and the budget. `git log` has each case.
 
-Round 2 has not yet run end to end against Flashpoint. Its control flow is covered by
-`test/control-flow`, and its reasoning by `test/brain-rounds-live.mjs`. On invented round-1
-results, that check showed the follow-up targeting exactly the gaps round 1 left open, and the
-round-2 read reporting what changed. It also re-asked "Which year are you in?", so repeated
+Round 2 first ran end to end in the judged run, including the send to the same named panel. Before
+that, its control flow was covered by `test/control-flow`, and its reasoning by
+`test/brain-rounds-live.mjs`. On invented round-1 results, that check showed the follow-up
+targeting the gaps round 1 left open. It also re-asked "Which year are you in?", so repeated
 questions are now dropped in code as well as by instruction.
 
 ### What it produces
@@ -351,23 +354,106 @@ number.
 
 ## 2. The high-level objective given to it
 
-<!-- FILLED IN AFTER THE LIVE RUN -->
+Copied from the `start` line of the judged run's log,
+[`runs/2026-11-22T18-11-12/log.jsonl`](runs/2026-11-22T18-11-12/log.jsonl):
 
-To be filled in from the `start` line of the judged run's log: the exact `--objective` and
-`--audience`, the recipient count, and the flags. It is copied from the log, not written from
-memory, so it stays empty until the run exists.
+> **Objective:** Figure out what LionMatch should build next so Columbia students use it to find
+> internships, research, clubs and fellowships
+>
+> **Audience:** Columbia undergraduates looking for internships, research, clubs and fellowships
+
+```bash
+node run.mjs --objective "Figure out what LionMatch should build next so Columbia students use it to find internships, research, clubs and fellowships" \
+             --audience "Columbia undergraduates looking for internships, research, clubs and fellowships" \
+             --emails <1 address> --rounds 2 --budget 9.5 --wait 240 --send
+```
+
+Started 22 November 2026 at 1:11pm ET with $9.53 USDC in the wallet. That one sentence was the only
+input. Everything in section 3 was decided by the agent.
+
+**Who answered.** The agent emailed its survey to the one address on its list, a team member,
+through Flashpoint's first-party panel. The public survey link was also shared with a teammate. The
+agent reads every response the survey receives, however it arrived, and the completes it reports
+count both.
 
 ---
 
 ## 3. What the agent decided
 
-<!-- FILLED IN AFTER THE LIVE RUN -->
+From the judged run: [`RUN.md`](runs/2026-11-22T18-11-12/RUN.md) (readable, every decision in
+order) and [`log.jsonl`](runs/2026-11-22T18-11-12/log.jsonl) (every call, reply and receipt).
+[`EXPLAINER.md`](EXPLAINER.md) walks through it as it happened.
 
-To be filled in round by round from the judged run's `RUN.md` and `log.jsonl`:
+**2 rounds · 27 paid MCP calls · $7.13 · 14.4 minutes · nobody typed anything after the command.**
 
-- the questions it wrote and its reasoning
-- the survey URL and the number of completes
-- what it made of the answers, and whether it judged them sufficient
-- the follow-up it chose and what changed
-- the final recommendation, with confidence and caveats
-- the payment table with basescan receipts
+### Round 1: "LionMatch: What Should We Build Next?"
+
+**What it decided to ask, and why.** From the objective alone it wrote 7 questions: what students
+are looking for, how they find it today, their biggest frustration, how useful six candidate
+features would be (1–5), what makes a recommendation trustworthy (1–5), what would make them pick
+LionMatch over Handshake or LinkedIn, and one open question. Its reasoning: LionMatch only wins if
+it solves a real friction point better than the alternatives, so it needed the friction, the
+priorities and the reason to switch.
+
+**What it did on its own.** Flashpoint asked three times to confirm publishing, and once more
+before sending. The agent answered each time itself. Code then checked that the survey was live
+([link](https://flashpointopinions.com/3d14da89-5e46-4bcc-a4fb-2c563d9aae44)) and that the
+invitation went out, before waiting 4 minutes.
+
+**What came back (2 completes)**, as Flashpoint reported it:
+
+| question | answers |
+|---|---|
+| Looking for | internships 2/2, clubs 2/2, research 1/2 |
+| How they find opportunities | word of mouth / friends 2/2 |
+| Biggest frustration | "don't know where to start" 1, "already closed or outdated" 1 |
+| Most useful feature | personalized recommendations, rated **5 and 5**; every other feature split (e.g. peer reviews 2 vs 5) |
+| Why pick LionMatch over Handshake / LinkedIn | "Columbia-specific" 2/2 |
+
+**What it concluded.** Not enough to decide. Personalized recommendations and Columbia-specificity
+were the leading signals, but the two respondents disagreed sharply on every other feature, and it
+could not tell whether that was two kinds of users or noise. It chose to **go again**.
+
+### Round 2: "LionMatch Follow-Up: Digging Deeper"
+
+**What it decided to ask next, and why.** Five new questions aimed at what round 1 left open: is
+the split between respondents a real segment (active applicant vs casual browser)? What would make
+a personalized recommendation feel useful rather than generic? What is the real barrier to using
+LionMatch more? Which one feature would they *actually use*, not just rate highly? None repeat a
+round-1 question. It sent this to the same named panel as round 1, the first live test of that
+step, and it worked first time.
+
+**What came back (1 complete):** actively applying with deadlines; wants recommendations tied to
+their major; biggest barrier is **not trusting that listings are fresh or accurate**; would actually
+use AI-drafted applications; in their words, *"it needs to be simplistic and organized and easy to
+use with one clear goal."*
+
+**What changed since round 1.** A new theme appeared: **trust in the listings**. Round 1 had framed
+the question as which feature to add. Round 2 suggested the blocker may be data quality, which no
+feature fixes.
+
+### The recommendation
+
+> Build a personalized opportunity feed filtered by major and interests, but do not launch it
+> until listing freshness and quality are demonstrably solved, because the one respondent who
+> named a barrier named distrust of listing quality, not a missing feature. Open with one clear
+> goal in the first 60 seconds, and make Columbia-specificity the explicit difference from
+> Handshake and LinkedIn. AI-assisted application drafts come second, for active applicants.
+
+**Confidence: low**, and it says why: three responses across two rounds cannot separate signal from
+noise. Its next question, if it had another round: *"What would make you trust that an opportunity
+listed on LionMatch is current, and what would make you immediately doubt it?"*, sent to 40+
+students across class years and majors.
+
+### Reading this run honestly
+
+- **Who answered.** The agent emailed one address, a team member, through Flashpoint's first-party
+  panel. A second round-1 answer came from a teammate using the public survey link, which is why
+  the log reads "2 of 1 answered". Three answers is a small sample, and the agent never pretends
+  otherwise. Holding back a confident answer on thin evidence is the behaviour we wanted.
+- **Round 1's write-up hedges its numbers.** On the default backend, the reasoning model wrote
+  "needs to be re-fetched" next to figures it had in front of it. The real figures, above, are in
+  the log exactly as Flashpoint returned them. Round 2's analysis quotes its numbers directly.
+- **Every decision is in [`RUN.md`](runs/2026-11-22T18-11-12/RUN.md):** 20 timeline entries, each
+  marked as the model's choice (▸) or a fact checked in code (✓), with the running spend.
+- **Every payment has a basescan receipt** in the table at the end of `RUN.md`.
