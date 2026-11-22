@@ -214,7 +214,9 @@ model with email addresses masked.
 
 If `ANTHROPIC_API_KEY` is set, the agent reasons with Claude instead (`claude-opus-5-5` via the
 official `@anthropic-ai/sdk`, `src/brain.mjs`). That spending happens outside the MCP ledger.
-`RUN.md` records which backend ran.
+If the key fails mid-run (a usage limit, a revoked key, an outage), the agent switches to
+Flashpoint `chat` for the rest of the run instead of stopping, and logs a `backend-switch`.
+`RUN.md` records which backend ran, including any switch.
 
 ### Silence is not a gap
 
@@ -263,7 +265,7 @@ says why it was not sent: dry run, not confirmed live, or send unconfirmed.
 
 ### Tests
 
-`npm test` runs all seven (the six below plus `test/mcp-server.test.mjs`), and so does CI on every push (the badge at the top). None of them call
+`npm test` runs all eight (the seven below plus `test/mcp-server.test.mjs`), and so does CI on every push (the badge at the top). None of them call
 Flashpoint, spend anything or need a wallet key:
 
 ```bash
@@ -283,6 +285,8 @@ node test/publish-detection.test.mjs  # replays the 4 real publish replies (runs
 node test/send-detection.test.mjs     # replays the 3 real send replies (runs/2026-11-22T01-20-38):
                                       # only "Invitation is on its way" is sent
 node test/timeout.test.mjs            # real x402 wrapper vs a silent and a stalling local server
+node test/backend-fallback.test.mjs   # Claude key hits a usage limit or drops: the run carries on
+                                      # through Flashpoint chat; a garbled reply is not an outage
 ```
 
 Two paid checks call the real `chat` tool, each capped at $0.10, and build no survey and send no

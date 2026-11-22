@@ -199,7 +199,7 @@ export class ResearchAgent {
     // call that turns everything it learned into an answer.
     this.reserveUsd = Math.min(0.05, budget / 10);
     this.flashpoint = new Flashpoint({ budget: budget - this.reserveUsd, log });
-    this.brain = new Brain({ flashpoint: this.flashpoint, log });
+    this.brain = new Brain({ flashpoint: this.flashpoint, log, say });
     this.history = [];
     this.ids = { conversationId: null, surveyId: null };
     // Unique per run, so round 2 can find round 1's panel by name and two

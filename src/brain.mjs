@@ -52,10 +52,12 @@ export class Brain {
    * @param {object} o
    * @param {import("./flashpoint.mjs").Flashpoint} o.flashpoint
    * @param {(entry: object) => Promise<void>} o.log
+   * @param {(line: string) => void} [o.say]
    */
-  constructor({ flashpoint, log }) {
+  constructor({ flashpoint, log, say }) {
     this.flashpoint = flashpoint;
     this.log = log;
+    this.say = say;
     this.useClaude = Boolean(process.env.ANTHROPIC_API_KEY);
     // The SDK reads ANTHROPIC_API_KEY itself; retries 429s, 5xx and dropped
     // connections twice; and gets its own ceiling so a stalled reply cannot
@@ -81,9 +83,23 @@ export class Brain {
           ? prompt
           : `${prompt}\n\nYour previous reply could not be used: ${lastError}. Reply with the JSON object only — no explanation, no code fence, nothing before or after it.`;
       try {
-        const raw = this.useClaude
-          ? await this.#askClaude(ask, effort)
-          : await this.#askFlashpoint(REASONING_ONLY + ask, why);
+        let raw;
+        if (this.useClaude) {
+          try {
+            raw = await this.#askClaude(ask, effort);
+          } catch (error) {
+            if (!(error instanceof Anthropic.APIError)) throw error;
+            // The key failed after the SDK's own retries: a usage limit, a
+            // revoked key, an outage. The hackathon keys share one org limit
+            // that teams were warned they might hit. A decision is still
+            // needed, so make it through Flashpoint's chat for the rest of
+            // the run rather than stop mid-study with people already mailed.
+            await this.#dropClaude(error, why);
+            raw = await this.#askFlashpoint(REASONING_ONLY + ask, why);
+          }
+        } else {
+          raw = await this.#askFlashpoint(REASONING_ONLY + ask, why);
+        }
         const decision = extractJson(raw);
         const missing = required.filter((key) => decision[key] === undefined);
         if (missing.length > 0) throw new Error(`missing field(s): ${missing.join(", ")}`);
@@ -101,6 +117,15 @@ export class Brain {
       }
     }
     throw new Error(`Could not get a usable decision for "${why}": ${lastError}`);
+  }
+
+  async #dropClaude(error, why) {
+    const reason = `${error.status ?? error.name}${error.message ? `: ${String(error.message).slice(0, 160)}` : ""}`;
+    this.useClaude = false;
+    this.anthropic = null;
+    this.backend = `flashpoint chat (switched from claude mid-run: ${reason})`;
+    await this.log?.({ type: "backend-switch", why, from: "claude", to: "flashpoint chat", problem: reason });
+    this.say?.(`  Claude unavailable (${reason}); reasoning through Flashpoint chat from here on`);
   }
 
   async #askFlashpoint(prompt, why) {
