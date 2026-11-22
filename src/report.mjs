@@ -20,6 +20,7 @@ export function renderRun({ summary, stamp, send }) {
     "no-responses": "nobody answered, even after a second wait, so there was nothing to follow up on",
     "not-sent": "nothing was sent, so nobody was asked (see the round for why)",
     budget: "it reached its spending cap",
+    "budget-short": "too little budget was left for another full round, so it answered with what it had",
     flashpoint: "Flashpoint failed or stopped responding (the detail is in log.jsonl)",
     error: "an unexpected error (the stack is in log.jsonl)",
   };

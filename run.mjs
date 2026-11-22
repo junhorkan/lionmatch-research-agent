@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Entry point.
 //
-//   node run.mjs --objective "Figure out the best event to run next spring"
-//                --audience "Columbia undergraduates in the AI Club"
+//   node run.mjs --objective "Figure out what LionMatch should build next"
+//                --audience "Columbia undergraduates"
 //                --emails me@example.com,friend@example.com
 //                --rounds 2 --budget 10 --send
 //
@@ -11,6 +11,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ResearchAgent } from "./src/agent.mjs";
 import { renderRun } from "./src/report.mjs";
 import { balance, redact, wallet } from "./src/flashpoint.mjs";
@@ -48,9 +49,18 @@ function args(argv) {
 
 const a = args(process.argv.slice(2));
 
+// "--objective --send" would otherwise set the objective to true and run a
+// paid survey about the word "true".
+for (const key of ["objective", "audience", "emails"]) {
+  if (a[key] === true) {
+    console.error(`  --${key} needs a value.`);
+    process.exit(1);
+  }
+}
+
 if (a.help || !a.objective) {
   console.log(`
-flashpoint-agent — give it one objective, it does the research.
+LionMatch research agent — give it one objective, it does the research.
 
   --objective  "<what you want to know>"        (required)
   --audience   "<who should answer>"            (default: the people on the list)
@@ -115,7 +125,9 @@ if (a["run-id"] !== undefined) {
   }
   stamp = a["run-id"];
 }
-const dir = path.join(path.dirname(new URL(import.meta.url).pathname), "runs", stamp);
+// fileURLToPath, not URL.pathname: a checkout under a folder with a space in
+// its name would otherwise write to a "%20" folder.
+const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "runs", stamp);
 if (fs.existsSync(path.join(dir, "log.jsonl"))) {
   console.error(`  runs/${stamp} already holds a run; pick another --run-id.`);
   process.exit(1);
@@ -142,7 +154,7 @@ try {
 }
 
 say("");
-say("  Flashpoint research agent");
+say("  LionMatch research agent (Flashpoint MCP)");
 say(`  wallet ${address}${opening === null ? "" : ` · ${opening.toFixed(2)} USDC`}`);
 say(`  log: ${logPath}`);
 say("");

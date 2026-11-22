@@ -9,7 +9,7 @@ import { ResearchAgent, completesFrom } from "../src/agent.mjs";
 process.env.ANTHROPIC_API_KEY = "";
 process.env.WAIT_MS = "0";
 
-async function scenario(name, { send, rounds, afterWait, recipients = 1 }, expect) {
+async function scenario(name, { send, rounds, afterWait, recipients = 1, spentAfterRound1 = 0 }, expect) {
   const agent = new ResearchAgent({
     objective: "test",
     audience: "test",
@@ -24,6 +24,7 @@ async function scenario(name, { send, rounds, afterWait, recipients = 1 }, expec
   agent.runRound = async (r) => {
     const round = { round: r, distributed: send, ...rounds[r - 1] };
     agent.history.push(round);
+    if (r === 1) agent.flashpoint.spentUsd = spentAfterRound1;
     return round;
   };
   agent.nudge = async (round) => {
@@ -82,6 +83,16 @@ const results = [
     "silence twice: no follow-up mailed",
     { send: true, rounds: [{ completes: 0, ...notEnough }], afterWait: { completes: 0, ...notEnough } },
     { rounds: 1, stopped: "no-responses", waits: 1 },
+  ),
+  await scenario(
+    "too little left for round 2: stops, no half-built survey",
+    { send: true, rounds: [{ completes: 6, ...notEnough }, { completes: 5, ...notEnough }], spentAfterRound1: 6.6 },
+    { rounds: 1, stopped: "budget-short", waits: 0 },
+  ),
+  await scenario(
+    "just enough left for round 2: goes again",
+    { send: true, rounds: [{ completes: 6, ...notEnough }, { completes: 5, ...notEnough }], spentAfterRound1: 6.0 },
+    { rounds: 2, stopped: null, waits: 0 },
   ),
 ];
 

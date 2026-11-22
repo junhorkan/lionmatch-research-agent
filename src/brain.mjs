@@ -251,7 +251,7 @@ export class Brain {
       "",
       `OBJECTIVE: ${objective}`,
       `ROUND: ${round} · ANSWERED: ${completes} of ${recipients} · BUDGET LEFT: $${remainingUsd.toFixed(2)}`,
-      `ROUNDS STILL ALLOWED AFTER THIS ONE: ${roundsLeft} (a full round costs about $4)`,
+      `ROUNDS STILL ALLOWED AFTER THIS ONE: ${roundsLeft} (a full round costs about $4, and none starts with less than $3.50 left)`,
       "",
       "Reply with JSON only:",
       '{"action": "remind"|"wait"|"proceed", "reasoning": "<one or two sentences, mentioning the cost trade-off>"}',

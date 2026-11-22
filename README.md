@@ -35,7 +35,8 @@ objective ─▶ Brain.planFirstRound ─▶ converse: build + publish ─▶ co
                                                                                ▼
   under half answered? the agent decides: ◀──── converse: collect ◀──── wait --wait seconds
   remind, wait longer, or carry on              (results = checked)
-  (still 0 after that: stop, "no-responses")
+  (still 0 after that: stop, "no-responses";
+   under $3.50 left for another round: stop, "budget-short")
                          │
                          ▼
                   Brain.analyse (sees earlier rounds) ── enough_to_answer: true ──┐
@@ -90,6 +91,10 @@ writes its recommendation. It sends nothing and reads no results.
 
 Prices are $0.50 per `tool_survey` turn and $0.01 per `chat` call. The one complete round with a
 real send cost $4.09 over 17 paid calls, so two rounds should come to about $8–9.
+
+**How long it takes.** A round is a few minutes of building and sending, then `--wait`, then a
+minute of reading. With `--wait 600`, one round takes about 15–20 minutes. Two rounds take about
+35–40, and close to an hour if the agent also decides to remind or wait longer.
 
 ### Use it from any MCP client: an agent that other agents can hire
 
@@ -153,7 +158,8 @@ script that cannot start a real run.
 ### Watching it decide
 
 The judging question is whether the agent is deciding or following a script, so every decision is
-labelled as it happens, on screen and in the write-up:
+labelled as it happens, on screen and in the write-up. An illustrative excerpt (the judged run's
+real timeline is in section 3):
 
 ```
   ▸ DECIDED  what to ask: "LionMatch: What Should We Build Next?", 7 questions. Why: …   ($0.01 spent)
@@ -164,7 +170,8 @@ labelled as it happens, on screen and in the write-up:
              still leaves enough for round 2.
 ```
 
-`▸ DECIDED` means the model chose. `✓ CHECKED` means code read a fact from Flashpoint's reply.
+`▸ DECIDED` means the model chose. `✓ CHECKED` means code read a fact from Flashpoint's reply or
+held a rule (no carrying on with zero answers, no round it cannot afford).
 Each `RUN.md` opens with the same list, **Decisions the agent made**, in order, with the running
 spend.
 
@@ -216,6 +223,10 @@ longer or carry on (`ResearchAgent.nudge`). Then it re-reads the **same** survey
 "follow-up" to answers that don't exist. If there are still none, it stops with `no-responses`.
 A reminder is email, so like a send it is never retried automatically.
 
+Before another round it checks the money: under $3.50 left (the least a round can cost and still
+reach anyone) it stops with `budget-short` and answers with what it has, rather than pay to
+publish a survey the cap would stop it sending. This matters after a reminder.
+
 A round that sent nothing stops with `not-sent` and pays nothing to read an empty survey. RUN.md
 says why it was not sent: dry run, not confirmed live, or send unconfirmed.
 
@@ -241,7 +252,7 @@ says why it was not sent: dry run, not confirmed live, or send unconfirmed.
     retried, mail everyone twice. If a send fails, the agent asks Flashpoint whether it already
     went out and sends only if it did not; if that fails too, the round is recorded as unconfirmed.
 - **Masking at the exit.** Every log line, every printed line and `RUN.md` pass through `redact()`,
-  which writes `<address at domain>` (`run.mjs`, `:175`). Masking field by field had leaked an
+  which writes `<address at domain>` (`run.mjs`). Masking field by field had leaked an
   address on the first real send. Only Flashpoint, which sends the mail, sees real addresses.
 - **One named panel across rounds** (`src/agent.mjs`).
   - Later rounds send to the same panel by name, and recreate it only if it is missing.
@@ -259,7 +270,8 @@ Flashpoint, spend anything or need a wallet key:
 node test/control-flow.test.mjs       # decisions between rounds (faked): dry run stops, not enough
                                       # -> follow-up, enough -> stop, too few answers -> nudge,
                                       # silence twice -> nothing more mailed; the nudge's limits
-                                      # (zero can't carry on, unaffordable reminder -> wait); completes
+                                      # (zero can't carry on, unaffordable reminder -> wait); too little
+                                      # left for round 2 -> stop; completes
 node test/guards.test.mjs             # bad flags refused before anything exists; tool errors raise,
                                       # retry once, stay charged; sends make exactly one attempt;
                                       # empty error fields ignored; the reserve; a sent round
@@ -312,8 +324,8 @@ number.
 <!-- FILLED IN AFTER THE LIVE RUN -->
 
 To be filled in from the `start` line of the judged run's log: the exact `--objective` and
-`--audience`, the recipient count, and the flags. It is left empty until then, so the input cannot
-be reverse-engineered from the output.
+`--audience`, the recipient count, and the flags. It is copied from the log, not written from
+memory, so it stays empty until the run exists.
 
 ---
 

@@ -22,6 +22,12 @@ const TURNS = { build: 5, distribute: 5, collect: 3 };
 // A reminder is three paid turns at worst-case confirms ($1.53) plus a
 // re-read ($0.52). Below this, the agent cannot afford one and waits instead.
 const REMIND_FLOOR_USD = 2.1;
+// The least a round can cost and still reach anyone: two build turns, the
+// three-turn send a real run needed, one read, and the planning and judging
+// chats ($3.03), plus a little slack. The one measured round cost $4.09.
+// Starting a round with less than this risks paying to publish a survey the
+// cap then stops it from sending.
+const ROUND_FLOOR_USD = 3.5;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Turn the brain's question list into the natural-language brief the surveys agent takes. */
@@ -177,7 +183,7 @@ function clip(s, n) {
 }
 
 // Exported for the regression test, which replays real Flashpoint replies.
-export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom, completesFrom, dropRepeats };
+export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom, completesFrom, dropRepeats, ROUND_FLOOR_USD };
 
 export class ResearchAgent {
   constructor({ objective, audience, emails, budget, maxRounds, send, log, say }) {
@@ -608,7 +614,7 @@ export class ResearchAgent {
           round = await this.nudge(round);
         }
         if (round.completes === 0) {
-          await this.decided("still no answers: there is nothing to follow up on, so no second survey goes out");
+          await this.checked("still no answers: there is nothing to follow up on, so no second survey goes out");
           stopped = "no-responses";
           break;
         }
@@ -619,6 +625,14 @@ export class ResearchAgent {
           break;
         }
         if (r < this.maxRounds) {
+          const left = this.flashpoint.remainingUsd;
+          if (left < ROUND_FLOOR_USD) {
+            await this.checked(
+              `stop here: $${left.toFixed(2)} is left and another round needs about $${ROUND_FLOOR_USD.toFixed(2)} to publish, send and read, so it answers with what it has rather than pay for a survey it cannot send`,
+            );
+            stopped = "budget-short";
+            break;
+          }
           await this.decided(`go again: round ${r + 1} goes after what round ${r} could not answer`);
         }
       }
