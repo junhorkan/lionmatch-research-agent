@@ -218,6 +218,8 @@ export class Brain {
       JSON.stringify(history, null, 2),
       "",
       "Between 3 and 6 questions, shorter than last time — people are answering you twice.",
+      "The same people answer every round, so never re-ask anything from an earlier round, background",
+      "questions included (year, major, prior use): you already have those answers.",
       "",
       "Reply with JSON only:",
       "{",

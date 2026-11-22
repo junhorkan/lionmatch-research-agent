@@ -1,8 +1,8 @@
 {
-  "name": "flashpoint-agent",
+  "name": "lionmatch-research-agent",
   "version": "1.0.0",
   "type": "module",
-  "description": "Give it one objective. It designs the research, runs it, learns, and answers.",
+  "description": "LionMatch decides what to build next by asking its own users: an agent that designs, runs and iterates on surveys through the Flashpoint MCP.",
   "scripts": {
     "start": "node run.mjs"
   },

@@ -148,8 +148,27 @@ function idsFrom(reply, current = {}) {
   };
 }
 
+/**
+ * Drop any question an earlier round already asked. The same people answer
+ * every round, so a repeat wastes a question and their patience. The planner
+ * is told this, and in a live check it still re-asked "Which year are you
+ * in?" — so it is enforced here too.
+ */
+function dropRepeats(questions, history) {
+  const norm = (s) =>
+    String(s ?? "")
+      .toLowerCase()
+      .replace(/\(.*?\)/g, "")
+      .replace(/[^a-z0-9 ]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const asked = new Set(history.flatMap((r) => r.plan?.questions ?? []).map((q) => norm(q.text)));
+  const kept = questions.filter((q) => !asked.has(norm(q.text)));
+  return { kept, dropped: questions.length - kept.length };
+}
+
 // Exported for the regression test, which replays real Flashpoint replies.
-export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom, completesFrom };
+export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom, completesFrom, dropRepeats };
 
 export class ResearchAgent {
   constructor({ objective, audience, emails, budget, maxRounds, send, log, say }) {
@@ -281,6 +300,14 @@ export class ResearchAgent {
     // Defend against a model that answers in a shape we did not ask for:
     // better a thin round than a stack trace in front of judges.
     plan.questions = Array.isArray(plan.questions) ? plan.questions.filter((q) => q && q.text) : [];
+    if (roundNumber > 1) {
+      const { kept, dropped } = dropRepeats(plan.questions, this.history);
+      if (dropped > 0) {
+        this.say?.(`  dropped ${dropped} question${dropped === 1 ? "" : "s"} already asked in an earlier round`);
+        await this.log?.({ type: "decision", stage: "drop-repeats", round: roundNumber, dropped });
+      }
+      plan.questions = kept;
+    }
     if (plan.questions.length === 0) throw new FlashpointError("The planner returned no usable questions.");
 
     this.say?.(`  decided: ${plan.reasoning ?? "(no reasoning given)"}`);

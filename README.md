@@ -1,4 +1,12 @@
-# flashpoint-agent
+# LionMatch Research Agent
+
+**LionMatch decides what to build next by asking its own users, through an agent.**
+
+[LionMatch](https://github.com/4amGrind/LionMatch) is our swipe-to-match app for Columbia
+internships, research, clubs and fellowships, which placed 3rd in the main hackathon. It already
+calls Flashpoint at runtime: an "Ask students" button pays a cent for a read on demand for a
+listing. This add-on goes a step further. Instead of answering one question, the agent runs the
+research behind a product decision, end to end.
 
 Give it one objective and an email list. It writes its own survey and gets Flashpoint's surveys
 agent to build and publish it. It emails the survey to the list, reads the answers and decides
@@ -6,11 +14,11 @@ whether they settle the objective. If they don't, it writes a follow-up aimed at
 and sends that to the same people. Then it commits to a recommendation.
 
 No survey question, analysis or stopping rule is written in this repo. The model produces them at
-run time, and code checks the facts its decisions rest on.
+run time, and code checks the facts its decisions rest on. Nothing in the code is specific to
+LionMatch: the objective is one flag, so the same agent works for any question about any audience.
 
 Team **LionMatch** (Alex, Jun, Max, Peter, Ayan), Columbia AI Club MCP Challenge, judged 22
-November 2026. (Our main-hackathon project, which placed 3rd, is a separate opportunity-matching
-app: github.com/4amGrind/LionMatch. This is not that.)
+November 2026.
 
 ---
 
@@ -54,10 +62,10 @@ cp .env.example .env
 ### Run
 
 ```bash
-node run.mjs --objective "Figure out the best event to run next spring" \
-             --audience "Columbia undergraduates in the AI Club" \
+node run.mjs --objective "Figure out what LionMatch should build next so Columbia students use it to find internships, research, clubs and fellowships" \
+             --audience "Columbia undergraduates looking for internships, research, clubs and fellowships" \
              --emails me@example.com,friend@example.com \
-             --rounds 2 --budget 10 --wait 120 --send
+             --rounds 2 --budget 9.5 --wait 600 --send
 ```
 
 | flag | meaning |
@@ -205,15 +213,22 @@ node test/send-detection.test.mjs     # replays the 3 real send replies (runs/20
 node test/timeout.test.mjs            # real x402 wrapper vs a silent and a stalling local server
 ```
 
-`test/brain-live.mjs` calls the real `chat` tool, capped at $0.10.
+Two paid checks call the real `chat` tool, each capped at $0.10, and build no survey and send no
+mail. `test/brain-live.mjs` covers analysing and recommending. `test/brain-rounds-live.mjs` runs
+every reasoning step of a two-round run on the LionMatch objective, using **invented** results that
+are printed and never saved.
 
 ### How it was built
 
 Every run against the live system surfaced a real failure. Each was fixed and, where possible,
-pinned with a test that replays the real replies from `runs/`. Two independent reviews of the code
-then tightened what decides "sent", retries and the budget. `git log` has each case.
+pinned with a test that replays the real replies from `runs/`. Three independent reviews of the
+code then tightened what decides "sent", retries and the budget. `git log` has each case.
 
-Round 2 has not yet run against Flashpoint. Its control flow is covered by `test/control-flow`.
+Round 2 has not yet run end to end against Flashpoint. Its control flow is covered by
+`test/control-flow`, and its reasoning by `test/brain-rounds-live.mjs`. On invented round-1
+results, that check showed the follow-up targeting exactly the gaps round 1 left open, and the
+round-2 read reporting what changed. It also re-asked "Which year are you in?", so repeated
+questions are now dropped in code as well as by instruction.
 
 ### What it produces
 
