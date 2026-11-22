@@ -1,6 +1,6 @@
 # LionMatch Research Agent
 
-[![tests](https://github.com/4amGrind/lionmatch-research-agent/actions/workflows/test.yml/badge.svg)](https://github.com/4amGrind/lionmatch-research-agent/actions/workflows/test.yml)
+[![tests](https://github.com/junhorkan/lionmatch-research-agent/actions/workflows/test.yml/badge.svg)](https://github.com/junhorkan/lionmatch-research-agent/actions/workflows/test.yml)
 
 **LionMatch decides what to build next by asking its own users, through an agent.**
 
