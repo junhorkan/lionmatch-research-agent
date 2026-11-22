@@ -39,13 +39,37 @@ function briefFrom(plan, objective, extra = "") {
   ].join("\n").trim();
 }
 
-/** Did the surveys agent just tell us the survey is live? */
+/**
+ * What the surveys agent actually said, in words. Its reply arrives wrapped:
+ * { conversation_id, task_id, status, result: { survey_id, final_text, … } }.
+ * Judging the wrapper instead of final_text buries the sentence that matters
+ * under a page of token counts.
+ */
+function textOf(reply) {
+  if (typeof reply === "string") return reply;
+  const t = reply?.result?.final_text ?? reply?.final_text ?? reply?.reply ?? reply?.message;
+  return typeof t === "string" ? t : JSON.stringify(reply ?? "");
+}
+
+/** Is it asking us to say "confirm"? Flashpoint gates publishing on it. */
+function asksToConfirm(text) {
+  return /reply\s*\**\s*["“]?confirm|type\s*["“]?confirm|please confirm|confirm one more time|to proceed/i.test(text);
+}
+
+/**
+ * Is the survey actually live? This is a fact, not a judgement, so it is
+ * checked directly instead of asked of a model.
+ *
+ * It needs the public URL itself. Matching the word "live" is not enough:
+ * mid-dance the surveys agent writes "publishing will make it live", while
+ * still waiting on a confirmation — a word match would declare victory with
+ * nothing published. Flashpoint also writes the link without https://.
+ */
 function publishedFrom(reply) {
-  const text = typeof reply === "string" ? reply : JSON.stringify(reply);
-  const url = text.match(/https:\/\/flashpointopinions\.com\/[0-9a-f-]{36}/i)?.[0] ?? null;
-  const id = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] ?? null;
-  const live = /\b(published|live|is now live|publicly available)\b/i.test(text);
-  return { url, id, live: Boolean(url) || live };
+  const text = textOf(reply);
+  const hit = text.match(/(?:https?:\/\/)?flashpointopinions\.com\/([0-9a-f-]{36})/i);
+  const url = hit ? `https://flashpointopinions.com/${hit[1]}` : null;
+  return { url, live: Boolean(url) && !asksToConfirm(text) };
 }
 
 function idsFrom(reply, current = {}) {
@@ -59,6 +83,9 @@ function idsFrom(reply, current = {}) {
     surveyId: current.surveyId ?? pick("survey_id"),
   };
 }
+
+// Exported for the regression test, which replays real Flashpoint replies.
+export { textOf, asksToConfirm, publishedFrom };
 
 export class ResearchAgent {
   constructor({ objective, audience, emails, budget, maxRounds, send, log, say }) {
@@ -80,7 +107,18 @@ export class ResearchAgent {
    * run out of turns. Each reply is read and answered by the brain, so the
    * agent is holding the conversation, not replaying a script.
    */
-  async converse(firstMessage, goal, { fresh = false, maxTurns = TURNS.build } = {}) {
+  /**
+   * Keep talking to the surveys agent until it has done what we asked or we
+   * run out of turns.
+   *
+   * Two kinds of reading happen here. Hard facts — is the survey live? — are
+   * checked directly by `isDone`, because a fact does not need an opinion
+   * and a model asked to confirm one can answer in prose and break the run.
+   * Everything genuinely ambiguous — it asked a question, it wants a choice,
+   * it pushed back — goes to the brain, which decides what to say. That is
+   * where the agent is holding the conversation rather than replaying one.
+   */
+  async converse(firstMessage, goal, { fresh = false, maxTurns = TURNS.build, isDone = null } = {}) {
     let message = firstMessage;
     let last = null;
     const ids = fresh ? { conversationId: null, surveyId: null } : this.ids;
@@ -93,23 +131,47 @@ export class ResearchAgent {
       last = await this.flashpoint.call("tool_survey", args, `${goal} (turn ${turn})`);
       Object.assign(ids, idsFrom(last, ids));
       this.ids = ids;
+      const said = textOf(last);
 
-      const verdict = await this.brain.think(
-        [
-          "You are a research agent mid-conversation with Flashpoint's survey agent.",
-          `YOUR GOAL FOR THIS EXCHANGE: ${goal}`,
-          "ITS LATEST REPLY:",
-          (typeof last === "string" ? last : JSON.stringify(last)).slice(0, 4000),
-          "",
-          "Has your goal been met? If not, what do you say back to move it along?",
-          "If it is asking you to confirm something you want, confirm it plainly.",
-          "",
-          "Reply with JSON only:",
-          '{"done": true|false, "reply": "<what to say next, empty if done>", "note": "<one short line on what just happened>"}',
-        ].join("\n"),
-        `judging the survey agent's reply (${goal})`,
-        ["done"],
-      );
+      if (isDone?.(last)) {
+        await this.log?.({ type: "turn", goal, turn, note: "goal met (checked directly)", done: true });
+        this.say?.(`    turn ${turn}: done — checked directly, no judgement needed`);
+        break;
+      }
+
+      let verdict;
+      try {
+        verdict = await this.brain.think(
+          [
+            "You are a research agent mid-conversation with Flashpoint's survey agent.",
+            `YOUR GOAL FOR THIS EXCHANGE: ${goal}`,
+            "WHAT IT JUST SAID TO YOU:",
+            said.slice(0, 3000),
+            "",
+            "Has your goal been met? If not, what do you say back to move it along?",
+            "When it asks you to confirm an action you want, reply with exactly the word it asks for —",
+            'Flashpoint expects the single word "confirm".',
+            "",
+            "You must reply with the JSON object below in every case, including when the goal is met.",
+            "Do not summarise, do not answer in a sentence, do not add anything outside the braces.",
+            '{"done": true|false, "reply": "<what to say next, empty if done>", "note": "<one short line on what just happened>"}',
+          ].join("\n"),
+          `judging the survey agent's reply (${goal})`,
+          ["done"],
+        );
+      } catch (error) {
+        // The judge failed twice. Fall back on what can be read without it,
+        // rather than losing the whole run over one unparseable sentence.
+        const confirming = asksToConfirm(said);
+        verdict = {
+          done: !confirming,
+          reply: confirming ? "confirm" : "",
+          note: confirming
+            ? "judge unreadable; it is asking to confirm, so confirming"
+            : "judge unreadable; nothing pending, treating this exchange as finished",
+        };
+        await this.log?.({ type: "fallback", goal, turn, problem: error.message, verdict });
+      }
 
       await this.log?.({ type: "turn", goal, turn, note: verdict.note, done: verdict.done });
       this.say?.(`    turn ${turn}: ${verdict.note ?? "(no note)"}`);
@@ -144,10 +206,11 @@ export class ResearchAgent {
     const built = await this.converse(
       briefFrom(plan, this.objective, "Publish it as soon as it is ready."),
       `create and publish the round ${roundNumber} survey`,
-      { fresh: roundNumber > 1, maxTurns: TURNS.build },
+      { fresh: roundNumber > 1, maxTurns: TURNS.build, isDone: (reply) => publishedFrom(reply).live },
     );
     const published = publishedFrom(built);
-    if (published.url) this.say?.(`  live: ${published.url}`);
+    if (published.live) this.say?.(`  live: ${published.url}`);
+    else this.say?.("  could not confirm it went live — carrying on, and saying so in the write-up");
 
     // Distribute. Real email to real people, so it is opt-in at the command line.
     let distributed = false;
@@ -181,14 +244,15 @@ export class ResearchAgent {
       { maxTurns: TURNS.collect },
     );
 
-    const analysis = await this.brain.analyse(this.objective, roundNumber, results);
+    // The analysis reads what the surveys agent wrote, not its envelope.
+    const analysis = await this.brain.analyse(this.objective, roundNumber, textOf(results));
     this.say?.(`  read them: ${analysis.reasoning}`);
     (analysis.findings ?? []).forEach((f) => this.say?.(`    • ${f}`));
 
     const round = {
       round: roundNumber,
       plan,
-      survey_url: published.url,
+      survey_url: published.live ? published.url : null,
       survey_id: this.ids.surveyId,
       distributed,
       analysis,
@@ -218,10 +282,13 @@ export class ResearchAgent {
         }
       }
     } catch (error) {
-      stopped = error instanceof BudgetExhausted ? "budget" : "error";
+      // Whatever went wrong, the rounds that did finish are real evidence and
+      // the money for them is already spent. Stop, keep them, and still write
+      // the recommendation and RUN.md — a crash here would throw all of it
+      // away. The stack goes in the log so the cause is not lost either.
+      stopped = error instanceof BudgetExhausted ? "budget" : error instanceof FlashpointError ? "flashpoint" : "error";
       this.say?.(`\n  stopped: ${error.message}`);
-      await this.log?.({ type: "stopped", reason: stopped, message: error.message });
-      if (!(error instanceof BudgetExhausted) && !(error instanceof FlashpointError)) throw error;
+      await this.log?.({ type: "stopped", reason: stopped, message: error.message, stack: error.stack });
     }
 
     this.say?.("\n── Recommendation ──");
