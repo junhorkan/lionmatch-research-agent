@@ -1,0 +1,19 @@
+# Runs the free test suite on every push. None of these tests call Flashpoint,
+# spend money or need a wallet key; the two paid checks in test/ are excluded.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test

@@ -19,6 +19,9 @@ import { Brain } from "./brain.mjs";
 // A real send took exactly 3 turns (build the panel, confirm, confirm again),
 // so 3 left no room; round 2 adds a lookup by name. Build took 4 of 5.
 const TURNS = { build: 5, distribute: 5, collect: 3 };
+// A reminder is three paid turns at worst-case confirms ($1.53) plus a
+// re-read ($0.52). Below this, the agent cannot afford one and waits instead.
+const REMIND_FLOOR_USD = 2.1;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Turn the brain's question list into the natural-language brief the surveys agent takes. */
@@ -167,6 +170,12 @@ function dropRepeats(questions, history) {
   return { kept, dropped: questions.length - kept.length };
 }
 
+/** One line, at most n characters. */
+function clip(s, n) {
+  const flat = String(s ?? "").replace(/\s+/g, " ").trim();
+  return flat.length > n ? `${flat.slice(0, n - 1).trimEnd()}…` : flat;
+}
+
 // Exported for the regression test, which replays real Flashpoint replies.
 export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom, completesFrom, dropRepeats };
 
@@ -189,9 +198,30 @@ export class ResearchAgent {
     this.ids = { conversationId: null, surveyId: null };
     // Unique per run, so round 2 can find round 1's panel by name and two
     // runs never share one.
-    this.panelName = `flashpoint-agent ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+    this.panelName = `LionMatch research ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
     this.panelCreated = false;
     this.lastExchangeDone = false;
+    // Every choice the agent made and every fact code checked, in order. It
+    // is the judging criterion made visible: RUN.md opens with it.
+    this.timeline = [];
+    this.currentRound = null;
+  }
+
+  /** A choice the agent made. Tagged on screen and kept for the timeline. */
+  async decided(text) {
+    return this.#mark("decided", "▸ DECIDED", text);
+  }
+
+  /** A fact read from Flashpoint's reply by code, not by the model. */
+  async checked(text) {
+    return this.#mark("checked", "✓ CHECKED", text);
+  }
+
+  async #mark(kind, tag, text) {
+    const entry = { kind, round: this.currentRound, text: clip(text, 240), spentUsd: Number(this.flashpoint.spentUsd.toFixed(2)) };
+    this.timeline.push(entry);
+    this.say?.(`  ${tag}  ${clip(text, 200)}  ($${entry.spentUsd.toFixed(2)} spent)`);
+    await this.log?.({ type: "timeline", ...entry });
   }
 
   /**
@@ -223,7 +253,7 @@ export class ResearchAgent {
 
       if (isDone?.(last)) {
         await this.log?.({ type: "turn", goal, turn, note: "goal met (checked directly)", done: true });
-        this.say?.(`    turn ${turn}: done — checked directly, no judgement needed`);
+        this.say?.(`    turn ${turn}: goal met, read from the reply by code`);
         this.lastExchangeDone = true;
         break;
       }
@@ -270,12 +300,23 @@ export class ResearchAgent {
           note: confirming
             ? "judge unreadable; it is asking to confirm, so confirming"
             : "judge unreadable; nothing pending, treating this exchange as finished",
+          fallback: true,
         };
         await this.log?.({ type: "fallback", goal, turn, problem: error.message, verdict });
       }
 
       await this.log?.({ type: "turn", goal, turn, note: verdict.note, done: verdict.done });
-      this.say?.(`    turn ${turn}: ${verdict.note ?? "(no note)"}`);
+      if (verdict.reply && !verdict.done) {
+        // The agent answering Flashpoint's surveys agent itself — the moment a
+        // person would normally have to step in. A fallback reply was chosen
+        // by code, so it is marked as a check, not a decision.
+        const note = String(verdict.note ?? "").trim();
+        const line = `turn ${turn}: replied "${clip(verdict.reply, 60)}". ${note.charAt(0).toUpperCase()}${note.slice(1)}`;
+        if (verdict.fallback) await this.checked(line);
+        else await this.decided(line);
+      } else {
+        this.say?.(`    turn ${turn}: ${verdict.note ?? "(no note)"}`);
+      }
 
       if (verdict.done) {
         // A judge saying "done" while the reply still asks for a confirm is
@@ -290,6 +331,7 @@ export class ResearchAgent {
   }
 
   async runRound(roundNumber) {
+    this.currentRound = roundNumber;
     this.say?.(`\n── Round ${roundNumber} ──`);
 
     const plan =
@@ -303,16 +345,17 @@ export class ResearchAgent {
     if (roundNumber > 1) {
       const { kept, dropped } = dropRepeats(plan.questions, this.history);
       if (dropped > 0) {
-        this.say?.(`  dropped ${dropped} question${dropped === 1 ? "" : "s"} already asked in an earlier round`);
+        await this.checked(`dropped ${dropped} question${dropped === 1 ? "" : "s"} an earlier round already asked`);
         await this.log?.({ type: "decision", stage: "drop-repeats", round: roundNumber, dropped });
       }
       plan.questions = kept;
     }
     if (plan.questions.length === 0) throw new FlashpointError("The planner returned no usable questions.");
 
-    this.say?.(`  decided: ${plan.reasoning ?? "(no reasoning given)"}`);
-    this.say?.(`  survey: "${plan.title}" — ${plan.questions.length} questions`);
-    plan.questions.forEach((q, i) => this.say?.(`    ${i + 1}. ${q.text}`));
+    await this.decided(
+      `${roundNumber === 1 ? "what to ask" : "what to ask next"}: "${plan.title}", ${plan.questions.length} questions. Why: ${plan.reasoning ?? "(no reasoning given)"}`,
+    );
+    plan.questions.forEach((q, i) => this.say?.(`      ${i + 1}. ${q.text}`));
 
     // Build and publish. A later round starts its own conversation, because
     // the surveys agent would otherwise try to edit the first survey.
@@ -323,8 +366,8 @@ export class ResearchAgent {
       { fresh: roundNumber > 1, maxTurns: TURNS.build, isDone: (reply) => publishedFrom(reply).live },
     );
     const published = publishedFrom(built);
-    if (published.live) this.say?.(`  live: ${published.url}`);
-    else this.say?.("  could not confirm it went live — carrying on, and saying so in the write-up");
+    if (published.live) await this.checked(`survey is live: ${published.url}`);
+    else await this.checked("could not confirm the survey went live; saying so in the write-up");
 
     // Distribute. Real email to real people, so it is opt-in at the command line.
     //
@@ -338,7 +381,7 @@ export class ResearchAgent {
     if (this.send && this.emails.length > 0 && !published.live) {
       // Emailing people a link to a survey that may not be live wastes their
       // goodwill and the round. Say so and skip.
-      this.say?.("  not sending: the survey is not confirmed live");
+      await this.checked("not sending: nobody gets a link to a survey that is not confirmed live");
       await this.log?.({ type: "decision", stage: "skip-send", round: roundNumber, reason: "survey not confirmed live" });
     } else if (this.send && this.emails.length > 0) {
       this.say?.(`  sending to ${this.emails.length} recipients…`);
@@ -378,7 +421,7 @@ export class ResearchAgent {
         });
       } catch (error) {
         if (error instanceof BudgetExhausted) throw error;
-        this.say?.("  the send step failed part-way; asking whether it already went out before doing anything else");
+        await this.decided("the send failed part-way: ask whether it already went out before sending again, so nobody is mailed twice");
         await this.log?.({ type: "send-check", round: roundNumber, problem: error.message });
         try {
           sentReply = await this.converse(
@@ -406,9 +449,9 @@ export class ResearchAgent {
       }
       if (distributed) {
         this.panelCreated = true;
-        this.say?.(`  sent (panel "${this.panelName}")`);
+        await this.checked(`invitation sent to ${this.emails.length} ${this.emails.length === 1 ? "person" : "people"} on panel "${this.panelName}"`);
       } else {
-        this.say?.("  could not confirm anything was sent — not waiting, and saying so in the write-up");
+        await this.checked("could not confirm the invitation went out; not waiting, and saying so in the write-up");
       }
     } else {
       this.say?.(this.send ? "  no recipients given, not sending" : "  dry run: not sending");
@@ -455,29 +498,80 @@ export class ResearchAgent {
       { maxTurns: TURNS.collect, isDone: (reply) => resultsFrom(reply).answered, nothingIsAnAnswer: true },
     );
     const completes = completesFrom(results);
-    if (completes !== null) this.say?.(`  ${completes} complete${completes === 1 ? "" : "s"}`);
+    if (completes !== null) {
+      await this.checked(`${completes} of ${this.emails.length} answered`);
+    }
 
     // The analysis reads what the surveys agent wrote, not its envelope, and
     // sees what earlier rounds found so it can say what this one changed.
     // Masked: a respondent can type their own address into a free-text answer,
     // and the reasoning backend has no need of it.
     const analysis = await this.brain.analyse(this.objective, roundNumber, redact(textOf(results)), earlier);
-    this.say?.(`  read them: ${analysis.reasoning}`);
-    (analysis.findings ?? []).forEach((f) => this.say?.(`    • ${f}`));
+    (analysis.findings ?? []).forEach((f) => this.say?.(`      • ${clip(f, 160)}`));
+    if (analysis.changed_since_last_round) this.say?.(`      changed since last round: ${clip(analysis.changed_since_last_round, 160)}`);
+    await this.decided(`enough to answer? ${analysis.enough_to_answer ? "yes" : "no"}. ${analysis.reasoning ?? ""}`);
     return { completes, analysis };
   }
 
   /**
-   * Nobody has answered. Wait once more and read the same survey again,
-   * rather than writing a "follow-up" to answers that do not exist and
-   * emailing the same people a second time.
+   * Too few people have answered to learn much. The agent chooses: send a
+   * reminder to the ones who have not, wait longer, or carry on with what it
+   * has. It weighs that against the money left, because a reminder can cost
+   * the round 2 it would be gathering evidence for.
+   *
+   * Zero answers can only be waited on or reminded about — there is nothing
+   * to carry on with — and a reminder it cannot afford is a wait. Either way
+   * it re-reads the same survey; it never writes a "follow-up" to answers
+   * that do not exist.
    */
-  async waitAgain(round) {
-    const waitMs = Number(process.env.WAIT_MS ?? 120000);
-    this.say?.(`\n  nobody has answered yet. A follow-up built on nothing would only mail the same people twice,`);
-    this.say?.(`  so the agent waits another ${Math.round(waitMs / 1000)}s and reads the same survey again.`);
-    await this.log?.({ type: "decision", stage: "wait-again", round: round.round, reason: "zero completes" });
-    await sleep(waitMs);
+  async nudge(round) {
+    const recipients = this.emails.length;
+    const remainingUsd = this.flashpoint.remainingUsd;
+    const waitSeconds = Math.round(Number(process.env.WAIT_MS ?? 120000) / 1000);
+    let choice = await this.brain.decideNudge(this.objective, {
+      round: round.round,
+      completes: round.completes,
+      recipients,
+      remainingUsd,
+      roundsLeft: this.maxRounds - round.round,
+      waitSeconds,
+    });
+
+    let action = ["remind", "wait", "proceed"].includes(choice.action) ? choice.action : "wait";
+    if (action === "proceed" && round.completes === 0) {
+      await this.checked("cannot carry on with zero answers, so waiting instead");
+      action = "wait";
+    }
+    if (action === "remind" && remainingUsd < REMIND_FLOOR_USD) {
+      await this.checked(`a reminder needs about $${REMIND_FLOOR_USD.toFixed(2)} and $${remainingUsd.toFixed(2)} is left, so waiting instead`);
+      action = "wait";
+    }
+    await this.decided(`${round.completes} of ${recipients} answered: ${action === "remind" ? "send a reminder" : action === "wait" ? "wait longer" : "carry on with what it has"}. ${choice.reasoning ?? ""}`);
+    round.nudge = { action, reasoning: choice.reasoning ?? null, reminded: false };
+    if (action === "proceed") return round;
+
+    if (action === "remind") {
+      let reply = null;
+      try {
+        // Like a send, a reminder is email: never retried blindly.
+        reply = await this.converse(
+          [
+            `Send a reminder about this survey to everyone on the panel named "${this.panelName}" who has not completed it yet.`,
+            "Do not create a panel, do not add anyone, and do not buy any respondents.",
+          ].join("\n"),
+          `remind the people on panel "${this.panelName}" who have not answered the round ${round.round} survey`,
+          { maxTurns: TURNS.distribute, isDone: (r) => sentFrom(r).sent, retry: false },
+        );
+      } catch (error) {
+        if (error instanceof BudgetExhausted) throw error;
+        await this.log?.({ type: "reminder", round: round.round, problem: error.message });
+      }
+      round.nudge.reminded = sentFrom(reply).sent;
+      await this.checked(round.nudge.reminded ? "reminder sent" : "could not confirm the reminder went out");
+    }
+
+    this.say?.(`  waiting another ${waitSeconds}s, then reading the same survey again…`);
+    await sleep(waitSeconds * 1000);
     const { completes, analysis } = await this.collectAndRead(
       round.round,
       this.history.filter((h) => h !== round),
@@ -502,27 +596,30 @@ export class ResearchAgent {
         // on, however Flashpoint reports the count. (Checking only for zero
         // let a dry run whose reply gave no count go on to build round 2.)
         if (!round.distributed) {
-          this.say?.("\n  nothing was sent, so there is nothing to follow up on.");
+          await this.checked("nothing was sent, so there is nothing to follow up on");
           stopped = "not-sent";
           break;
         }
 
-        // Zero answers is not a gap to follow up on; it is silence. Give
-        // people one more window before deciding anything.
-        if (round.completes === 0) round = await this.waitAgain(round);
+        // Too few answers to learn much: remind, wait or carry on. Zero is
+        // not a gap to follow up on; it is silence.
+        const quorum = Math.ceil(this.emails.length / 2);
+        if (round.completes !== null && round.completes < quorum && !round.analysis?.enough_to_answer) {
+          round = await this.nudge(round);
+        }
         if (round.completes === 0) {
-          this.say?.("\n  still no answers. There is nothing to follow up on, so no second survey goes out.");
+          await this.decided("still no answers: there is nothing to follow up on, so no second survey goes out");
           stopped = "no-responses";
           break;
         }
 
         if (round.analysis?.enough_to_answer) {
-          this.say?.("\n  the agent says it has enough to answer. Stopping early.");
+          await this.decided("stop here: it has enough to answer the objective");
           stopped = "answered";
           break;
         }
         if (r < this.maxRounds) {
-          this.say?.("\n  not enough yet — going again on what it could not answer.");
+          await this.decided(`go again: round ${r + 1} goes after what round ${r} could not answer`);
         }
       }
     } catch (error) {
@@ -536,11 +633,12 @@ export class ResearchAgent {
     }
 
     this.flashpoint.budgetUsd += this.reserveUsd;
+    this.currentRound = null;
     this.say?.("\n── Recommendation ──");
     let recommendation = null;
     try {
       recommendation = await this.brain.recommend(this.objective, this.history);
-      this.say?.(`  ${recommendation.recommendation}`);
+      await this.decided(`recommend (${recommendation.confidence} confidence): ${recommendation.recommendation}`);
       this.say?.(`  confidence: ${recommendation.confidence} — ${recommendation.confidence_reason}`);
     } catch (error) {
       this.say?.(`  could not write one: ${error.message}`);
@@ -551,6 +649,7 @@ export class ResearchAgent {
       audience: this.audience,
       backend: this.brain.backend,
       rounds: this.history,
+      timeline: this.timeline,
       recommendation,
       stopped,
       spentUsd: Number(this.flashpoint.spentUsd.toFixed(2)),

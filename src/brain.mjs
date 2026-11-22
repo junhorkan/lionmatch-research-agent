@@ -234,6 +234,33 @@ export class Brain {
     return decision;
   }
 
+  /**
+   * Too few answers. Remind, wait, or carry on — with the costs in front of
+   * it, because a reminder can eat the budget round 2 needs.
+   */
+  async decideNudge(objective, { round, completes, recipients, remainingUsd, roundsLeft, waitSeconds }) {
+    const prompt = [
+      "You are a research agent. A survey you sent has had too few answers to learn much from yet.",
+      "Decide what to do next. You have three options:",
+      `- "remind": email a reminder to everyone who has not answered, then wait ${waitSeconds}s and read again.`,
+      "  Costs about $2. Worth it if more answers would change what you can conclude, and you can afford it.",
+      `- "wait": wait another ${waitSeconds}s without emailing anyone, then read again. Costs about $0.52.`,
+      "  Better when people may simply not have had time yet, or a second email would be pushy.",
+      '- "proceed": carry on with the answers you have. Costs nothing now. Only possible if at least one',
+      "  person has answered.",
+      "",
+      `OBJECTIVE: ${objective}`,
+      `ROUND: ${round} · ANSWERED: ${completes} of ${recipients} · BUDGET LEFT: $${remainingUsd.toFixed(2)}`,
+      `ROUNDS STILL ALLOWED AFTER THIS ONE: ${roundsLeft} (a full round costs about $4)`,
+      "",
+      "Reply with JSON only:",
+      '{"action": "remind"|"wait"|"proceed", "reasoning": "<one or two sentences, mentioning the cost trade-off>"}',
+    ].join("\n");
+    const decision = await this.think(prompt, `deciding how to handle too few answers in round ${round}`, ["action"]);
+    await this.log?.({ type: "decision", stage: "nudge", round, decision });
+    return decision;
+  }
+
   /** The thing the human actually asked for. */
   async recommend(objective, history) {
     const prompt = [

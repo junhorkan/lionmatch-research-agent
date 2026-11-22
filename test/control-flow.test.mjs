@@ -9,11 +9,11 @@ import { ResearchAgent, completesFrom } from "../src/agent.mjs";
 process.env.ANTHROPIC_API_KEY = "";
 process.env.WAIT_MS = "0";
 
-async function scenario(name, { send, rounds, afterWait }, expect) {
+async function scenario(name, { send, rounds, afterWait, recipients = 1 }, expect) {
   const agent = new ResearchAgent({
     objective: "test",
     audience: "test",
-    emails: send ? ["someone@example.com"] : [],
+    emails: send ? Array.from({ length: recipients }, (_, i) => `person${i}@example.com`) : [],
     budget: 10,
     maxRounds: 2,
     send,
@@ -26,7 +26,7 @@ async function scenario(name, { send, rounds, afterWait }, expect) {
     agent.history.push(round);
     return round;
   };
-  agent.waitAgain = async (round) => {
+  agent.nudge = async (round) => {
     waits++;
     return Object.assign(round, afterWait, { waited_twice: true });
   };
@@ -69,11 +69,53 @@ const results = [
     { rounds: 2, stopped: null, waits: 1 },
   ),
   await scenario(
+    "1 of 4 answered: the agent is asked to nudge",
+    { send: true, recipients: 4, rounds: [{ completes: 1, ...notEnough }, { completes: 3, ...notEnough }], afterWait: { completes: 3, ...notEnough } },
+    { rounds: 2, stopped: null, waits: 1 },
+  ),
+  await scenario(
+    "3 of 4 answered: no nudge, straight to round 2",
+    { send: true, recipients: 4, rounds: [{ completes: 3, ...notEnough }, { completes: 3, ...notEnough }] },
+    { rounds: 2, stopped: null, waits: 0 },
+  ),
+  await scenario(
     "silence twice: no follow-up mailed",
     { send: true, rounds: [{ completes: 0, ...notEnough }], afterWait: { completes: 0, ...notEnough } },
     { rounds: 1, stopped: "no-responses", waits: 1 },
   ),
 ];
+
+// The nudge decision itself: what the agent may and may not do, whatever the
+// model asks for. Brain and Flashpoint are faked; nothing is sent.
+async function nudgeCase(name, { completes, recipients = 4, remaining, modelSays }, expectAction, expectRemindSent) {
+  const agent = new ResearchAgent({
+    objective: "test", audience: "test",
+    emails: Array.from({ length: recipients }, (_, i) => `person${i}@example.com`),
+    budget: 10, maxRounds: 2, send: true, log: async () => {}, say: () => {},
+  });
+  agent.flashpoint.spentUsd = agent.flashpoint.budgetUsd - remaining;
+  agent.brain.decideNudge = async () => ({ action: modelSays, reasoning: "test" });
+  let reminderAsked = false;
+  agent.converse = async (message) => {
+    if (/reminder/i.test(message)) reminderAsked = true;
+    return { result: { final_text: "Reminder is on its way to the 3 people who have not answered." } };
+  };
+  agent.collectAndRead = async () => ({ completes: completes + 1, analysis: { enough_to_answer: false } });
+  const round = { round: 1, distributed: true, completes, analysis: { enough_to_answer: false } };
+  agent.history.push(round);
+  const out = await agent.nudge(round);
+  const ok = out.nudge.action === expectAction && reminderAsked === expectRemindSent;
+  console.log(`${ok ? "ok   " : "WRONG"}  ${name.padEnd(46)} model said ${modelSays} -> ${out.nudge.action}${reminderAsked ? ", reminder sent" : ""}`);
+  return ok;
+}
+
+results.push(
+  await nudgeCase("zero answers cannot 'proceed'", { completes: 0, remaining: 9, modelSays: "proceed" }, "wait", false),
+  await nudgeCase("a reminder it cannot afford becomes a wait", { completes: 1, remaining: 1.5, modelSays: "remind" }, "wait", false),
+  await nudgeCase("an affordable reminder is sent", { completes: 1, remaining: 9, modelSays: "remind" }, "remind", true),
+  await nudgeCase("some answers: carrying on is allowed", { completes: 1, remaining: 9, modelSays: "proceed" }, "proceed", false),
+  await nudgeCase("a nonsense action becomes a wait", { completes: 1, remaining: 9, modelSays: "panic" }, "wait", false),
+);
 
 // Completes as Flashpoint actually writes them.
 const counts = [

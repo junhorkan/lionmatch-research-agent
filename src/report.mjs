@@ -63,6 +63,21 @@ export function renderRun({ summary, stamp, send }) {
     `- **Paid calls:** ${summary.calls} · **spent:** $${summary.spentUsd.toFixed(2)} · **wall clock:** ${summary.minutes} min`,
     summary.stopped ? `- **Stopped because:** ${STOPPED[summary.stopped] ?? summary.stopped}` : null,
     "",
+    // The judging criterion, made visible: every choice the agent made and
+    // every fact code checked, in order. Older runs predate the timeline.
+    ...(summary.timeline?.length
+      ? [
+          "## Decisions the agent made",
+          "",
+          "▸ the agent chose · ✓ code read a fact from Flashpoint's reply · running spend in brackets",
+          "",
+          ...summary.timeline.map(
+            (t, i) =>
+              `${i + 1}. ${t.kind === "decided" ? "▸ **Decided**" : "✓ Checked"}${t.round ? ` (round ${t.round})` : ""}: ${t.text} *($${Number(t.spentUsd ?? 0).toFixed(2)})*`,
+          ),
+          "",
+        ]
+      : []),
     "## What the agent decided, round by round",
     "",
     ...summary.rounds.flatMap((r) => [
@@ -78,7 +93,10 @@ export function renderRun({ summary, stamp, send }) {
       "",
       sentLine(r),
       "",
-      r.completes === null || r.completes === undefined ? null : `**Completes:** ${r.completes}${r.waited_twice ? " (after waiting a second time)" : ""}`,
+      r.completes === null || r.completes === undefined
+        ? null
+        : `**Completes:** ${r.completes}${r.nudge?.reminded ? " (after a reminder and a second wait)" : r.waited_twice ? " (after waiting a second time)" : ""}`,
+      r.nudge ? `*Too few answers at first; it chose to ${r.nudge.action === "remind" ? "send a reminder" : r.nudge.action === "wait" ? "wait longer" : "carry on"}:* ${r.nudge.reasoning ?? "—"}` : null,
       "",
       ...readLines(r),
       "",

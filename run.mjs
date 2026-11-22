@@ -104,8 +104,22 @@ try {
   process.exit(1);
 }
 
-const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+// --run-id lets a caller (the MCP server) name the run up front, so it can
+// report on a run it started. It may have created the folder already, to
+// catch this process's output; it must not already hold a run.
+let stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+if (a["run-id"] !== undefined) {
+  if (typeof a["run-id"] !== "string" || !/^[A-Za-z0-9-]{6,64}$/.test(a["run-id"])) {
+    console.error('  --run-id must be 6-64 letters, digits or hyphens.');
+    process.exit(1);
+  }
+  stamp = a["run-id"];
+}
 const dir = path.join(path.dirname(new URL(import.meta.url).pathname), "runs", stamp);
+if (fs.existsSync(path.join(dir, "log.jsonl"))) {
+  console.error(`  runs/${stamp} already holds a run; pick another --run-id.`);
+  process.exit(1);
+}
 fs.mkdirSync(dir, { recursive: true });
 const logPath = path.join(dir, "log.jsonl");
 const stream = fs.createWriteStream(logPath, { flags: "a" });

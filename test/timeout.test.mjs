@@ -37,7 +37,15 @@ async function probe(path) {
   }
 }
 
-console.log("server never answers:      ", await probe("/silent"));
-console.log("server answers then stalls:", await probe("/stall"));
+const silent = await probe("/silent");
+const stall = await probe("/stall");
+console.log("server never answers:      ", silent);
+console.log("server answers then stalls:", stall);
 server.closeAllConnections?.();
 server.close();
+
+// Both must abort, and promptly: a pass that silently returned would make CI
+// green while a dead call could still freeze a live run.
+const pass = [silent, stall].every((r) => /^aborted as TimeoutError/.test(r));
+console.log(pass ? "PASS" : "FAIL");
+process.exit(pass ? 0 : 1);

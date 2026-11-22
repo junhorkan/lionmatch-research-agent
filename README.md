@@ -1,5 +1,7 @@
 # LionMatch Research Agent
 
+[![tests](https://github.com/4amGrind/lionmatch-research-agent/actions/workflows/test.yml/badge.svg)](https://github.com/4amGrind/lionmatch-research-agent/actions/workflows/test.yml)
+
 **LionMatch decides what to build next by asking its own users, through an agent.**
 
 [LionMatch](https://github.com/4amGrind/LionMatch) is our swipe-to-match app for Columbia
@@ -31,8 +33,9 @@ objective ─▶ Brain.planFirstRound ─▶ converse: build + publish ─▶ co
                                                                                │
                                                nothing sent? stop ("not-sent") ◀┤
                                                                                ▼
-  0 completes? wait once more, re-read ◀────── converse: collect ◀──── wait --wait seconds
-  (still 0: stop, "no-responses")              (results = checked)
+  under half answered? the agent decides: ◀──── converse: collect ◀──── wait --wait seconds
+  remind, wait longer, or carry on              (results = checked)
+  (still 0 after that: stop, "no-responses")
                          │
                          ▼
                   Brain.analyse (sees earlier rounds) ── enough_to_answer: true ──┐
@@ -88,41 +91,95 @@ writes its recommendation. It sends nothing and reads no results.
 Prices are $0.50 per `tool_survey` turn and $0.01 per `chat` call. The one complete round with a
 real send cost $4.09 over 17 paid calls, so two rounds should come to about $8–9.
 
+### Use it from any MCP client: an agent that other agents can hire
+
+The research agent is an MCP *client* of Flashpoint. It is also an MCP *server* in its own right.
+`mcp-server.mjs` exposes it as four tools, so Claude Code, Cursor, Claude Desktop or any other
+agent can hand LionMatch a research question and get a finished study back:
+
+| tool | what it does |
+|---|---|
+| `run_research` | starts a run (objective, audience, emails, send, rounds, **budget, which is required**, wait_seconds) and returns a run id at once; the run carries on in the background, so an overnight study survives the client closing |
+| `get_research_status` | the phase it is in, each round's completes and verdict, money spent so far, and the recommendation once finished |
+| `get_research_report` | the finished `RUN.md`, decision timeline included |
+| `list_research_runs` | every run in `runs/`, newest first |
+
+Claude Code picks it up from [`.mcp.json`](.mcp.json) when this folder is opened. To add it by hand:
+
+```bash
+claude mcp add --scope project lionmatch-research -- node mcp-server.mjs
+```
+
+For Cursor or Claude Desktop, give the absolute path to `mcp-server.mjs`. Guard rails:
+
+- `budget` has no default, so a client that spends money must say how much.
+- One run at a time.
+- Run ids are checked against path traversal.
+- The tool description says plainly that it spends real USDC and that `send: true` emails real
+  people irreversibly. Keep `run_research` off any auto-approve list, so a person confirms every
+  run.
+
+`test/mcp-server.test.mjs` drives the real server through the MCP SDK's own client, using a stand-in
+script that cannot start a real run.
+
 ### Where the agent decides
 
 - **It writes the questions from the objective alone.**
-  - `Brain.planFirstRound` (`src/brain.mjs:139`) gets only the objective and audience.
+  - `Brain.planFirstRound` (`src/brain.mjs`) gets only the objective and audience.
   - It returns 5–8 typed questions, its `reasoning`, and a prediction of what success looks like.
   - There is no question bank. `grep -rn questions run.mjs src/` finds only the JSON shape inside
     prompts and the code that formats the answer.
 - **It holds the conversation with Flashpoint's surveys agent.**
-  - `converse` (`src/agent.mjs:178`) reads each reply and decides what to say back.
+  - `converse` (`src/agent.mjs`) reads each reply and decides what to say back.
   - Publishing and sending each need two separate "confirm" replies. The agent gives all four
-    itself (`src/agent.mjs:211`).
+    itself (`src/agent.mjs`).
   - In the one real send, nobody typed anything after the command.
-- **It judges the evidence.** `Brain.analyse` (`src/brain.mjs:167`) returns findings with numbers,
+- **It judges the evidence.** `Brain.analyse` (`src/brain.mjs`) returns findings with numbers,
   surprises, gaps, and an `enough_to_answer` verdict it must justify.
-- **It stops, waits, or follows up** (`src/agent.mjs:426`).
+- **It stops, waits, or follows up** (`src/agent.mjs`).
   - If it has enough, it stops early with budget left.
-  - If not, `Brain.planFollowUp` (`src/brain.mjs:210`) gets the full history. It must name the gap
+  - If not, `Brain.planFollowUp` (`src/brain.mjs`) gets the full history. It must name the gap
     it is chasing and not repeat earlier questions.
 - **Round 2 learns from round 1.** Its analysis sees the earlier findings and must say what was
-  confirmed or overturned (`src/brain.mjs:183`).
-- **It commits to an answer.** `Brain.recommend` (`src/brain.mjs:236`) may say "more research is
+  confirmed or overturned (`src/brain.mjs`).
+- **It decides what to do about silence.** When fewer than half the list has answered,
+  `Brain.decideNudge` chooses between emailing a reminder to those who haven't answered, waiting
+  longer, or carrying on. It is given the cost of each option and the budget left, because a $2
+  reminder can cost the round 2 it would be gathering evidence for. Code holds two lines whatever
+  the model says: zero answers cannot "carry on", and a reminder it cannot afford becomes a wait.
+- **It commits to an answer.** `Brain.recommend` (`src/brain.mjs`) may say "more research is
   needed" only if it names the next question. It must give a confidence level and the sample size.
+
+### Watching it decide
+
+The judging question is whether the agent is deciding or following a script, so every decision is
+labelled as it happens, on screen and in the write-up:
+
+```
+  ▸ DECIDED  what to ask: "LionMatch: What Should We Build Next?", 7 questions. Why: …   ($0.01 spent)
+  ▸ DECIDED  turn 1: replied "confirm". It asked to confirm before an irreversible step   ($0.52 spent)
+  ✓ CHECKED  survey is live: https://flashpointopinions.com/…                             ($1.53 spent)
+  ✓ CHECKED  1 of 4 answered                                                               ($3.04 spent)
+  ▸ DECIDED  1 of 4 answered: send a reminder. One answer is too thin, and a $2 reminder   ($3.06 spent)
+             still leaves enough for round 2.
+```
+
+`▸ DECIDED` means the model chose. `✓ CHECKED` means code read a fact from Flashpoint's reply.
+Each `RUN.md` opens with the same list, **Decisions the agent made**, in order, with the running
+spend.
 
 ### Facts are checked in code; judgement goes to the model
 
 Code, not the model, reads four facts from Flashpoint's replies: is the survey live, was it sent,
 are there results, how many completes. The functions are `publishedFrom`, `sentFrom`, `resultsFrom`
-and `completesFrom` (`src/agent.mjs:64–125`). The model decides what to say next, never whether a
+and `completesFrom` (`src/agent.mjs`). The model decides what to say next, never whether a
 fact is true. Each check replaced something that failed against the real system:
 
 - **Live means the public URL is present, and either Flashpoint says outright that it is live or
   nothing is waiting on a confirm.**
   - In the dry runs, every publish reply contained the word "live", e.g. "publishing will make it
     live". A plain word match declared victory on turn 1.
-- **Sent means Flashpoint said it was sent, and only `sentFrom` decides** (`src/agent.mjs:339`).
+- **Sent means Flashpoint said it was sent, and only `sentFrom` decides** (`src/agent.mjs`).
   - Flashpoint's real wording for a send is "Invitation is on its way".
   - "Will be sent" is a promise, not a send.
   - A request to confirm ("reply 'confirm'", "when you confirm"), however it is quoted, means
@@ -133,7 +190,7 @@ fact is true. Each check replaced something that failed against the real system:
     `disagreement` is logged.
 - **"0 completes" counts as an answer.** In one dry run, the judge heard exactly that, then asked
   Flashpoint to run another project's panel to manufacture data. Now the judge is told that
-  "nothing has happened yet is the answer" only while it reads results (`src/agent.mjs:221`).
+  "nothing has happened yet is the answer" only while it reads results (`src/agent.mjs`).
 
 ### The reasoning backend
 
@@ -144,30 +201,31 @@ a paid MCP call.
 this wallet has done. Asked to reason, it sometimes acts: in testing it reached for a panel from a
 different project, and a recommendation call hung while it tried.
 
-So every prompt on this backend opens with a `REASONING_ONLY` fence (`src/brain.mjs:26`): no tools,
+So every prompt on this backend opens with a `REASONING_ONLY` fence (`src/brain.mjs`): no tools,
 no surveys or panels, nothing from other conversations, JSON only. Replies and results reach the
 model with email addresses masked.
 
 If `ANTHROPIC_API_KEY` is set, the agent reasons with Claude instead (`claude-opus-5-5` via the
-official `@anthropic-ai/sdk`, `src/brain.mjs:116`). That spending happens outside the MCP ledger.
+official `@anthropic-ai/sdk`, `src/brain.mjs`). That spending happens outside the MCP ledger.
 `RUN.md` records which backend ran.
 
 ### Silence is not a gap
 
-If a sent round gets zero completes, the agent does not mail a "follow-up" to answers that don't
-exist. It waits once more and re-reads the same survey (`src/agent.mjs:411`). If there are still
-none, it stops with `no-responses`.
+If fewer than half the list has answered, the agent decides whether to send a reminder, wait
+longer or carry on (`ResearchAgent.nudge`). Then it re-reads the **same** survey. It never mails a
+"follow-up" to answers that don't exist. If there are still none, it stops with `no-responses`.
+A reminder is email, so like a send it is never retried automatically.
 
 A round that sent nothing stops with `not-sent` and pays nothing to read an empty survey. RUN.md
 says why it was not sent: dry run, not confirmed live, or send unconfirmed.
 
 ### Guard rails
 
-- **Budget cap, checked before every call** (`src/flashpoint.mjs:215`).
+- **Budget cap, checked before every call** (`src/flashpoint.mjs`).
   - A call is charged as soon as its payment receipt arrives, even if it then fails.
   - The cap is measured against a local price table, not the amount Flashpoint quotes.
   - A reserve of up to $0.05 is held back so the recommendation can always be written
-    (`src/agent.mjs:155`).
+    (`src/agent.mjs`).
 - **`--send` is off by default.** With it, the run says how many people will be mailed and pauses
   five seconds for Ctrl-C. Nothing is emailed unless the survey is confirmed live.
 - **Timeouts and tool failures are retried once.**
@@ -176,30 +234,32 @@ says why it was not sent: dry run, not confirmed live, or send unconfirmed.
   - A tool error reported inside an HTTP 200 counts as a failure. One dry run had parsed one as an
     answer.
   - A failed call is retried once on a fresh session, and both tries are charged
-    (`src/flashpoint.mjs:189`).
+    (`src/flashpoint.mjs`).
   - A second failure stops the run cleanly. The exception is a failure while the model is judging
     a reply: there, code falls back to the facts it can read itself.
   - **Sending is never retried automatically.** A send that went out and then timed out would,
     retried, mail everyone twice. If a send fails, the agent asks Flashpoint whether it already
     went out and sends only if it did not; if that fails too, the round is recorded as unconfirmed.
 - **Masking at the exit.** Every log line, every printed line and `RUN.md` pass through `redact()`,
-  which writes `<address at domain>` (`run.mjs:118`, `:175`). Masking field by field had leaked an
+  which writes `<address at domain>` (`run.mjs`, `:175`). Masking field by field had leaked an
   address on the first real send. Only Flashpoint, which sends the mail, sees real addresses.
-- **One named panel across rounds** (`src/agent.mjs:162`).
+- **One named panel across rounds** (`src/agent.mjs`).
   - Later rounds send to the same panel by name, and recreate it only if it is missing.
   - Briefs tell Flashpoint to add nobody and buy no paid respondents.
-- **Turn caps per phase:** build 5, send 5, collect 3 (`src/agent.mjs:21`).
+- **Turn caps per phase:** build 5, send 5, collect 3 (`src/agent.mjs`).
 - **A round is recorded as soon as it is sent.** If reading its results fails, RUN.md still shows
   it, marked "sent, but the results were never read".
 
 ### Tests
 
-None of these call Flashpoint or spend anything:
+`npm test` runs all seven (the six below plus `test/mcp-server.test.mjs`), and so does CI on every push (the badge at the top). None of them call
+Flashpoint, spend anything or need a wallet key:
 
 ```bash
 node test/control-flow.test.mjs       # decisions between rounds (faked): dry run stops, not enough
-                                      # -> follow-up, enough -> stop, silence -> wait, silence twice
-                                      # -> nothing more mailed; completes parsing
+                                      # -> follow-up, enough -> stop, too few answers -> nudge,
+                                      # silence twice -> nothing more mailed; the nudge's limits
+                                      # (zero can't carry on, unaffordable reminder -> wait); completes
 node test/guards.test.mjs             # bad flags refused before anything exists; tool errors raise,
                                       # retry once, stay charged; sends make exactly one attempt;
                                       # empty error fields ignored; the reserve; a sent round
@@ -233,7 +293,9 @@ questions are now dropped in code as well as by instruction.
 ### What it produces
 
 `runs/<stamp>/log.jsonl` (every event, price and receipt) and `runs/<stamp>/RUN.md` (the readable
-write-up, with basescan receipts).
+write-up). Each RUN.md opens with the decision timeline, then goes round by round: the questions,
+why it asked them, what came back and what it concluded. It ends with the recommendation and a
+table of basescan receipts. [`runs/README.md`](runs/README.md) says what each run in the folder was.
 
 **Example only, not the judged run:** `runs/2026-11-22T01-20-38/RUN.md` is a one-round test sent to
 a single recipient.
