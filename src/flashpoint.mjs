@@ -63,12 +63,32 @@ export async function balance() {
   return Number(formatUnits(raw, 6));
 }
 
-const post = (url, body, headers = {}, f = fetch) =>
+const post = (url, body, headers = {}, f = fetch, signal = undefined) =>
   f(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
+
+/*
+  The global dispatcher has no timeout, because a panel run legitimately takes
+  half an hour. But a call that never answers would then hang forever — and on
+  a live demo, a frozen terminal is the worst possible outcome. So each tool
+  gets its own ceiling, generous enough for real work and short enough that a
+  dead call is noticed. A chat turn that normally takes 3 seconds and has gone
+  quiet for two minutes is not thinking; it is gone.
+*/
+const TIMEOUT_MS = {
+  chat: 120_000,
+  tool_survey: 300_000,
+  panel: 300_000,
+  default: 300_000,
+};
+
+// A FlashpointError, so the agent's run loop stops gracefully on it and still
+// writes up what it learned, rather than crashing.
+export class FlashpointTimeout extends FlashpointError {}
 
 /** Email addresses belong to other people. They never reach a log file. */
 function redact(args) {
@@ -158,6 +178,24 @@ export class Flashpoint {
    * this call; it goes in the log so a reader can follow the reasoning.
    */
   async call(name, args = {}, why = "") {
+    const limit = TIMEOUT_MS[name] ?? TIMEOUT_MS.default;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await this.#attempt(name, args, attempt === 1 ? why : `${why} — retry after timeout`, limit);
+      } catch (error) {
+        const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+        if (!timedOut) throw error;
+        await this.log?.({ type: "timeout", tool: name, attempt, afterSeconds: limit / 1000 });
+        if (attempt === 2) {
+          throw new FlashpointTimeout(`${name} did not answer within ${limit / 1000}s on two tries.`);
+        }
+        // A session can die without saying so. Retry on a fresh one.
+        this.session = null;
+      }
+    }
+  }
+
+  async #attempt(name, args, why, limit) {
     const price = PRICES[name] ?? 0.5;
     if (this.spentUsd + price > this.budgetUsd + 1e-9) {
       throw new BudgetExhausted(
@@ -169,11 +207,15 @@ export class Flashpoint {
     const started = Date.now();
     await this.log?.({ type: "call", tool: name, why, price, args: redact(args) });
 
+    // One signal covers the whole exchange, body included: a reply that
+    // starts and then stalls is as dead as one that never starts.
+    const signal = AbortSignal.timeout(limit);
     const res = await post(
       `${BASE}/mcp`,
       { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } },
       headers,
       paidFetch,
+      signal,
     );
 
     // A receipt means the money has already left, whatever the call does next.
