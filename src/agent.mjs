@@ -66,6 +66,17 @@ function resultsFrom(reply) {
   return { answered: none || some, empty: none && !some };
 }
 
+/**
+ * Did the surveys agent say the invitations went out? Checked directly for
+ * the same reason as publishing: a run that claims "sent" must have sent.
+ */
+function sentFrom(reply) {
+  const text = textOf(reply);
+  const said = /\b(?:sent|emailed|delivered)\b|invitations? (?:went|are|have gone) out/i.test(text);
+  const failed = /\b(?:failed to send|could not send|unable to send|not (?:yet )?(?:been )?sent|nothing (?:was )?sent)\b/i.test(text);
+  return { sent: said && !failed && !asksToConfirm(text) };
+}
+
 /** Is it asking us to say "confirm"? Flashpoint gates publishing on it. */
 function asksToConfirm(text) {
   return /reply\s*\**\s*["“]?confirm|type\s*["“]?confirm|please confirm|confirm one more time|to proceed/i.test(text);
@@ -96,11 +107,12 @@ function idsFrom(reply, current = {}) {
   return {
     conversationId: current.conversationId ?? pick("conversation_id"),
     surveyId: current.surveyId ?? pick("survey_id"),
+    panelId: current.panelId ?? pick("panel_id"),
   };
 }
 
 // Exported for the regression test, which replays real Flashpoint replies.
-export { textOf, asksToConfirm, publishedFrom, resultsFrom };
+export { textOf, asksToConfirm, publishedFrom, resultsFrom, sentFrom, idsFrom };
 
 export class ResearchAgent {
   constructor({ objective, audience, emails, budget, maxRounds, send, log, say }) {
@@ -115,6 +127,8 @@ export class ResearchAgent {
     this.brain = new Brain({ flashpoint: this.flashpoint, log });
     this.history = [];
     this.ids = { conversationId: null, surveyId: null };
+    this.panelId = null;
+    this.lastExchangeDone = false;
   }
 
   /**
@@ -136,6 +150,7 @@ export class ResearchAgent {
   async converse(firstMessage, goal, { fresh = false, maxTurns = TURNS.build, isDone = null } = {}) {
     let message = firstMessage;
     let last = null;
+    this.lastExchangeDone = false;
     const ids = fresh ? { conversationId: null, surveyId: null } : this.ids;
 
     for (let turn = 1; turn <= maxTurns; turn++) {
@@ -151,6 +166,7 @@ export class ResearchAgent {
       if (isDone?.(last)) {
         await this.log?.({ type: "turn", goal, turn, note: "goal met (checked directly)", done: true });
         this.say?.(`    turn ${turn}: done — checked directly, no judgement needed`);
+        this.lastExchangeDone = true;
         break;
       }
 
@@ -198,7 +214,12 @@ export class ResearchAgent {
       await this.log?.({ type: "turn", goal, turn, note: verdict.note, done: verdict.done });
       this.say?.(`    turn ${turn}: ${verdict.note ?? "(no note)"}`);
 
-      if (verdict.done) break;
+      if (verdict.done) {
+        // A judge saying "done" while the reply still asks for a confirm is
+        // wrong, and would let an unsent round be recorded as sent.
+        this.lastExchangeDone = !asksToConfirm(said);
+        break;
+      }
       if (!verdict.reply) break;
       message = verdict.reply;
     }
@@ -235,19 +256,34 @@ export class ResearchAgent {
     else this.say?.("  could not confirm it went live — carrying on, and saying so in the write-up");
 
     // Distribute. Real email to real people, so it is opt-in at the command line.
+    //
+    // Round 1 builds a panel from the list. Later rounds send to that same
+    // panel: building a second one from the same addresses would put every
+    // person on two panels and mail them twice.
     let distributed = false;
     if (this.send && this.emails.length > 0) {
       this.say?.(`  sending to ${this.emails.length} recipients…`);
-      await this.converse(
-        [
-          "Create a first-party panel from exactly these email addresses and send them this survey now:",
-          this.emails.join(", "),
-          "Do not add anyone else and do not buy any paid respondents.",
-        ].join("\n"),
-        `send the round ${roundNumber} survey to the list`,
-        { maxTurns: TURNS.distribute },
-      );
-      distributed = true;
+      const ask = this.panelId
+        ? [
+            `Send this survey to the existing first-party panel ${this.panelId} — the same people as the last round.`,
+            "Do not create a new panel, do not add anyone, and do not buy any paid respondents.",
+          ]
+        : [
+            "Create a first-party panel from exactly these email addresses and send them this survey now:",
+            this.emails.join(", "),
+            "Do not add anyone else and do not buy any paid respondents.",
+          ];
+      const sentReply = await this.converse(ask.join("\n"), `send the round ${roundNumber} survey to the list`, {
+        maxTurns: TURNS.distribute,
+        isDone: (reply) => sentFrom(reply).sent,
+      });
+      this.panelId ??= idsFrom(sentReply).panelId;
+
+      // "Sent" is a claim that ends up in the write-up, so it has to be true.
+      // The conversation ending is not evidence that mail went out.
+      distributed = sentFrom(sentReply).sent || this.lastExchangeDone;
+      if (distributed) this.say?.(`  sent${this.panelId ? ` (panel ${this.panelId})` : ""}`);
+      else this.say?.("  could not confirm anything was sent — not waiting, and saying so in the write-up");
     } else {
       this.say?.(this.send ? "  no recipients given, not sending" : "  dry run: not sending");
     }
