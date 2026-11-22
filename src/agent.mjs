@@ -108,6 +108,7 @@ export class ResearchAgent {
           '{"done": true|false, "reply": "<what to say next, empty if done>", "note": "<one short line on what just happened>"}',
         ].join("\n"),
         `judging the survey agent's reply (${goal})`,
+        ["done"],
       );
 
       await this.log?.({ type: "turn", goal, turn, note: verdict.note, done: verdict.done });
@@ -128,7 +129,12 @@ export class ResearchAgent {
         ? await this.brain.planFirstRound(this.objective, this.audience)
         : await this.brain.planFollowUp(this.objective, this.history);
 
-    this.say?.(`  decided: ${plan.reasoning}`);
+    // Defend against a model that answers in a shape we did not ask for:
+    // better a thin round than a stack trace in front of judges.
+    plan.questions = Array.isArray(plan.questions) ? plan.questions.filter((q) => q && q.text) : [];
+    if (plan.questions.length === 0) throw new FlashpointError("The planner returned no usable questions.");
+
+    this.say?.(`  decided: ${plan.reasoning ?? "(no reasoning given)"}`);
     this.say?.(`  survey: "${plan.title}" — ${plan.questions.length} questions`);
     plan.questions.forEach((q, i) => this.say?.(`    ${i + 1}. ${q.text}`));
 

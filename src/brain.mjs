@@ -41,13 +41,40 @@ export class Brain {
     this.backend = this.useClaude ? `claude (${CLAUDE_MODEL})` : "flashpoint chat";
   }
 
-  async think(prompt, why) {
-    const reply = this.useClaude ? await this.#askClaude(prompt) : await this.#askFlashpoint(prompt, why);
-    return extractJson(reply);
+  /**
+   * Ask for a decision and insist on getting one back in the shape we need.
+   * A model that answers in prose, or drops a field, costs a cent to correct
+   * — far better than a run dying halfway through a live demo.
+   */
+  async think(prompt, why, required = []) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const ask =
+        attempt === 1
+          ? prompt
+          : `${prompt}\n\nYour previous reply could not be used: ${lastError}. Reply with the JSON object only — no explanation, no code fence, nothing before or after it.`;
+      try {
+        const raw = this.useClaude ? await this.#askClaude(ask) : await this.#askFlashpoint(ask, why);
+        const decision = extractJson(raw);
+        const missing = required.filter((key) => decision[key] === undefined);
+        if (missing.length > 0) throw new Error(`missing field(s): ${missing.join(", ")}`);
+        return decision;
+      } catch (error) {
+        lastError = error.message;
+        await this.log?.({ type: "retry", why, attempt, problem: lastError });
+      }
+    }
+    throw new Error(`Could not get a usable decision for "${why}": ${lastError}`);
   }
 
   async #askFlashpoint(prompt, why) {
-    return this.flashpoint.call("chat", { message: prompt }, why);
+    const result = await this.flashpoint.call("chat", { message: prompt }, why);
+    // chat answers as { conversation_id, reply }. The decision is in `reply`;
+    // handing the whole envelope to the JSON reader finds the envelope.
+    if (result && typeof result === "object") {
+      return result.reply ?? result.response ?? result.message ?? result.text ?? result;
+    }
+    return result;
   }
 
   async #askClaude(prompt) {
@@ -92,7 +119,7 @@ export class Brain {
       '  "success_looks_like": "<one sentence: what pattern in the answers would give you a clear answer>"',
       "}",
     ].join("\n");
-    const decision = await this.think(prompt, "deciding what to ask in round 1");
+    const decision = await this.think(prompt, "deciding what to ask in round 1", ["title", "questions", "reasoning"]);
     await this.log?.({ type: "decision", stage: "plan", round: 1, decision });
     return decision;
   }
@@ -117,7 +144,7 @@ export class Brain {
       '  "reasoning": "<2-3 sentences justifying that true or false>"',
       "}",
     ].join("\n");
-    const decision = await this.think(prompt, `reading round ${round} results`);
+    const decision = await this.think(prompt, `reading round ${round} results`, ["findings", "enough_to_answer"]);
     await this.log?.({ type: "decision", stage: "analyse", round, decision });
     return decision;
   }
@@ -143,7 +170,7 @@ export class Brain {
       '  "what_would_change_my_answer": "<one sentence>"',
       "}",
     ].join("\n");
-    const decision = await this.think(prompt, "deciding what to ask in the follow-up round");
+    const decision = await this.think(prompt, "deciding what to ask in the follow-up round", ["title", "questions", "reasoning"]);
     await this.log?.({ type: "decision", stage: "plan", round: history.length + 1, decision });
     return decision;
   }
@@ -170,7 +197,7 @@ export class Brain {
       '  "next_question": "<the one thing you would ask if you had another round>"',
       "}",
     ].join("\n");
-    const decision = await this.think(prompt, "writing the final recommendation");
+    const decision = await this.think(prompt, "writing the final recommendation", ["recommendation", "confidence"]);
     await this.log?.({ type: "decision", stage: "recommend", decision });
     return decision;
   }
