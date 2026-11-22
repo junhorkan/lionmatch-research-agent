@@ -9,8 +9,27 @@
 // MCP's `chat` tool, so every thought the agent has is a paid call and shows
 // up in the same ledger as the research. Set ANTHROPIC_API_KEY and it reasons
 // with Claude instead, which is sharper but spends outside the MCP.
+//
+// The two are not alike, and the difference bit us. `chat` is not a plain
+// model: it is Flashpoint's orchestrator, with its own tools and a memory of
+// everything this wallet has ever done. Asked to think, it sometimes acts —
+// in one dry run it tried to run a synthetic panel from a different project,
+// and in another it hung for minutes trying to. So on that backend every
+// prompt opens with REASONING_ONLY, and the run treats facts it can check
+// itself (is the survey live? are there results?) as facts, not questions.
 
-const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-opus-5";
+import Anthropic from "@anthropic-ai/sdk";
+import { BudgetExhausted, FlashpointError } from "./flashpoint.mjs";
+
+const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-opus-5-5";
+
+const REASONING_ONLY = [
+  "THIS IS A REASONING REQUEST, NOT A TASK.",
+  "Do not call any tool. Do not create, publish, send, run or look up any survey, panel or study.",
+  "Do not use anything you remember from earlier conversations or other projects on this account.",
+  "Work only from the text below, and reply with only the JSON object it asks for.",
+  "",
+].join("\n");
 
 /** Pull the first JSON object out of a reply that may be wrapped in prose. */
 function extractJson(raw) {
@@ -38,6 +57,10 @@ export class Brain {
     this.flashpoint = flashpoint;
     this.log = log;
     this.useClaude = Boolean(process.env.ANTHROPIC_API_KEY);
+    // The SDK reads ANTHROPIC_API_KEY itself; retries 429s, 5xx and dropped
+    // connections twice; and gets its own ceiling so a stalled reply cannot
+    // freeze the run any more than a stalled Flashpoint call can.
+    this.anthropic = this.useClaude ? new Anthropic({ timeout: 120_000, maxRetries: 2 }) : null;
     this.backend = this.useClaude ? `claude (${CLAUDE_MODEL})` : "flashpoint chat";
   }
 
@@ -45,8 +68,12 @@ export class Brain {
    * Ask for a decision and insist on getting one back in the shape we need.
    * A model that answers in prose, or drops a field, costs a cent to correct
    * — far better than a run dying halfway through a live demo.
+   *
+   * `effort` only matters on the Claude backend. Designing a survey and
+   * weighing evidence deserve "high"; reading whether a reply said "confirm"
+   * does not, and "low" keeps those checks quick.
    */
-  async think(prompt, why, required = []) {
+  async think(prompt, why, required = [], effort = "high") {
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const ask =
@@ -54,12 +81,21 @@ export class Brain {
           ? prompt
           : `${prompt}\n\nYour previous reply could not be used: ${lastError}. Reply with the JSON object only — no explanation, no code fence, nothing before or after it.`;
       try {
-        const raw = this.useClaude ? await this.#askClaude(ask) : await this.#askFlashpoint(ask, why);
+        const raw = this.useClaude
+          ? await this.#askClaude(ask, effort)
+          : await this.#askFlashpoint(REASONING_ONLY + ask, why);
         const decision = extractJson(raw);
         const missing = required.filter((key) => decision[key] === undefined);
         if (missing.length > 0) throw new Error(`missing field(s): ${missing.join(", ")}`);
         return decision;
       } catch (error) {
+        // This loop exists to correct a garbled answer. A dead connection or
+        // an empty budget is not that: the network layer has already retried
+        // the call, and asking again here would multiply the wait — one hung
+        // call became eight minutes before this line existed.
+        if (error instanceof FlashpointError || error instanceof BudgetExhausted || error instanceof Anthropic.APIError) {
+          throw error;
+        }
         lastError = error.message;
         await this.log?.({ type: "retry", why, attempt, problem: lastError });
       }
@@ -77,23 +113,26 @@ export class Brain {
     return result;
   }
 
-  async #askClaude(prompt) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: CLAUDE_MODEL,
-        max_tokens: 2000,
-        messages: [{ role: "user", content: prompt }],
-      }),
+  async #askClaude(prompt, effort) {
+    // Opus 5.5 always thinks (adaptive); effort is the only dial, and its
+    // default is "medium", so it is set explicitly. `fallbacks: "default"`
+    // lets the API re-run a declined request on a fallback model inside the
+    // same call, rather than this run stopping on a false-positive refusal.
+    const response = await this.anthropic.beta.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 16000,
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      output_config: { effort },
+      messages: [{ role: "user", content: prompt }],
     });
-    if (!res.ok) throw new Error(`Claude returned HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const body = await res.json();
-    return body.content?.map((b) => b.text ?? "").join("") ?? "";
+    if (response.stop_reason === "refusal") {
+      throw new Error(`Claude declined (${response.stop_details?.category ?? "no category"})`);
+    }
+    return response.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("");
   }
 
   /** Round one: turn a one-line objective into a survey worth running. */

@@ -51,6 +51,21 @@ function textOf(reply) {
   return typeof t === "string" ? t : JSON.stringify(reply ?? "");
 }
 
+/**
+ * Did the collect request get an answer — either results, or a plain
+ * statement that there are none yet? Both mean the exchange is over.
+ *
+ * "0 completes" is a complete answer. In the third dry run the agent heard
+ * exactly that on turn 1, then kept going and asked Flashpoint to run an
+ * unrelated synthetic panel to manufacture some data. Zero is the finding.
+ */
+function resultsFrom(reply) {
+  const text = textOf(reply);
+  const none = /\b0\s+(?:completes?|responses?)\b|nobody has (?:answered|responded)|no (?:one|responses?) (?:has|have) (?:answered|responded)|no responses yet/i.test(text);
+  const some = /\d+\s*%/.test(text) && /\b(?:complete|respon|answer)/i.test(text);
+  return { answered: none || some, empty: none && !some };
+}
+
 /** Is it asking us to say "confirm"? Flashpoint gates publishing on it. */
 function asksToConfirm(text) {
   return /reply\s*\**\s*["“]?confirm|type\s*["“]?confirm|please confirm|confirm one more time|to proceed/i.test(text);
@@ -85,7 +100,7 @@ function idsFrom(reply, current = {}) {
 }
 
 // Exported for the regression test, which replays real Flashpoint replies.
-export { textOf, asksToConfirm, publishedFrom };
+export { textOf, asksToConfirm, publishedFrom, resultsFrom };
 
 export class ResearchAgent {
   constructor({ objective, audience, emails, budget, maxRounds, send, log, say }) {
@@ -152,12 +167,19 @@ export class ResearchAgent {
             "When it asks you to confirm an action you want, reply with exactly the word it asks for —",
             'Flashpoint expects the single word "confirm".',
             "",
+            "Stay strictly inside YOUR GOAL above. Never ask it to create, run or buy a panel, synthetic",
+            "respondents, recruits, or anything else the goal does not name — those cost money and change",
+            "who is being studied. If the honest answer is that nothing has happened yet, that IS the",
+            "answer: mark done. Use only what is in this message; ignore any other project, panel or",
+            "conversation you may remember from this account.",
+            "",
             "You must reply with the JSON object below in every case, including when the goal is met.",
             "Do not summarise, do not answer in a sentence, do not add anything outside the braces.",
             '{"done": true|false, "reply": "<what to say next, empty if done>", "note": "<one short line on what just happened>"}',
           ].join("\n"),
           `judging the survey agent's reply (${goal})`,
           ["done"],
+          "low",
         );
       } catch (error) {
         // The judge failed twice. Fall back on what can be read without it,
@@ -241,7 +263,7 @@ export class ResearchAgent {
     const results = await this.converse(
       "Give me the results of this survey so far: every question, the counts and percentages for each answer, every free-text response, and the number of completes. If nobody has answered yet, say exactly that.",
       `collect the round ${roundNumber} results`,
-      { maxTurns: TURNS.collect },
+      { maxTurns: TURNS.collect, isDone: (reply) => resultsFrom(reply).answered },
     );
 
     // The analysis reads what the surveys agent wrote, not its envelope.
