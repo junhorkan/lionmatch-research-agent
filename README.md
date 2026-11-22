@@ -19,6 +19,16 @@ No survey question, analysis or stopping rule is written in this repo. The model
 run time, and code checks the facts its decisions rest on. Nothing in the code is specific to
 LionMatch: the objective is one flag, so the same agent works for any question about any audience.
 
+### Demo video (52 s)
+
+[![LionMatch Research Agent demo video: the agent decides there is not enough evidence and reports honestly](media/lionmatch-agent-demo-poster.jpg)](media/lionmatch-agent-demo.mp4)
+
+▶ [**Watch the demo**](media/lionmatch-agent-demo.mp4). It follows the recorded run
+[`runs/2026-11-22T01-20-38`](runs/2026-11-22T01-20-38/RUN.md) from one objective to a published
+Flashpoint survey, one response and an honest, low-confidence recommendation. That run was capped at
+one round, so the film shows remind, wait and follow-up as paths the agent can take, not ones it took
+there.
+
 **See it in action:** [`EXPLAINER.md`](EXPLAINER.md) walks through the judged run step by step,
 with the agent's real screen output.
 
