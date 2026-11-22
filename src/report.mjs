@@ -17,7 +17,8 @@ export function renderRun({ summary, stamp, send }) {
   // ran together into one paragraph.
   const STOPPED = {
     answered: "the agent decided it had enough to answer",
-    "no-responses": "nobody answered, so there was nothing to follow up on",
+    "no-responses": "nobody answered, even after a second wait, so there was nothing to follow up on",
+    "not-sent": "nothing was sent (a dry run, or the send could not be confirmed), so nobody was asked",
     budget: "it reached its spending cap",
     flashpoint: "Flashpoint stopped responding",
     error: "an unexpected error (the stack is in log.jsonl)",

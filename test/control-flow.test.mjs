@@ -46,7 +46,12 @@ const results = [
   await scenario(
     "dry run: nothing sent, no second survey",
     { send: false, rounds: [{ completes: 0, ...notEnough }] },
-    { rounds: 1, stopped: "no-responses", waits: 0 },
+    { rounds: 1, stopped: "not-sent", waits: 0 },
+  ),
+  await scenario(
+    "dry run whose reply gave no count: still stops",
+    { send: false, rounds: [{ completes: null, ...notEnough }] },
+    { rounds: 1, stopped: "not-sent", waits: 0 },
   ),
   await scenario(
     "answers in, not enough: runs the follow-up",

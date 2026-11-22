@@ -9,14 +9,16 @@
 // Nothing below contains a survey question. Every question that goes out is
 // written by the model at run time from the objective.
 
-import { BudgetExhausted, Flashpoint, FlashpointError } from "./flashpoint.mjs";
+import { BudgetExhausted, Flashpoint, FlashpointError, redact } from "./flashpoint.mjs";
 import { Brain } from "./brain.mjs";
 
 // tool_survey is a conversation, not one call, and every turn of it costs
 // $0.50. Three conversations a round means the turn cap is the main thing
 // standing between a run and its budget, so each phase gets its own, sized
 // to what that phase actually needs.
-const TURNS = { build: 5, distribute: 3, collect: 3 };
+// A real send took exactly 3 turns (build the panel, confirm, confirm again),
+// so 3 left no room; round 2 adds a lookup by name. Build took 4 of 5.
+const TURNS = { build: 5, distribute: 5, collect: 3 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Turn the brain's question list into the natural-language brief the surveys agent takes. */
@@ -120,7 +122,6 @@ function idsFrom(reply, current = {}) {
   return {
     conversationId: current.conversationId ?? pick("conversation_id"),
     surveyId: current.surveyId ?? pick("survey_id"),
-    panelId: current.panelId ?? pick("panel_id"),
   };
 }
 
@@ -136,7 +137,11 @@ export class ResearchAgent {
     this.send = send;
     this.log = log;
     this.say = say;
-    this.flashpoint = new Flashpoint({ budget, log });
+    // Hold a few cents back so the recommendation can always be written: a
+    // run that spends its cap on round 2 would otherwise be refused the one
+    // call that turns everything it learned into an answer.
+    this.reserveUsd = Math.min(0.05, budget / 10);
+    this.flashpoint = new Flashpoint({ budget: budget - this.reserveUsd, log });
     this.brain = new Brain({ flashpoint: this.flashpoint, log });
     this.history = [];
     this.ids = { conversationId: null, surveyId: null };
@@ -149,11 +154,6 @@ export class ResearchAgent {
 
   /**
    * Keep talking to the surveys agent until it has done what we asked or we
-   * run out of turns. Each reply is read and answered by the brain, so the
-   * agent is holding the conversation, not replaying a script.
-   */
-  /**
-   * Keep talking to the surveys agent until it has done what we asked or we
    * run out of turns.
    *
    * Two kinds of reading happen here. Hard facts — is the survey live? — are
@@ -163,7 +163,7 @@ export class ResearchAgent {
    * it pushed back — goes to the brain, which decides what to say. That is
    * where the agent is holding the conversation rather than replaying one.
    */
-  async converse(firstMessage, goal, { fresh = false, maxTurns = TURNS.build, isDone = null } = {}) {
+  async converse(firstMessage, goal, { fresh = false, maxTurns = TURNS.build, isDone = null, nothingIsAnAnswer = false } = {}) {
     let message = firstMessage;
     let last = null;
     this.lastExchangeDone = false;
@@ -193,7 +193,7 @@ export class ResearchAgent {
             "You are a research agent mid-conversation with Flashpoint's survey agent.",
             `YOUR GOAL FOR THIS EXCHANGE: ${goal}`,
             "WHAT IT JUST SAID TO YOU:",
-            said.slice(0, 3000),
+            redact(said).slice(0, 3000),
             "",
             "Has your goal been met? If not, what do you say back to move it along?",
             "When it asks you to confirm an action you want, reply with exactly the word it asks for —",
@@ -201,9 +201,12 @@ export class ResearchAgent {
             "",
             "Stay strictly inside YOUR GOAL above. Never ask it to create, run or buy a panel, synthetic",
             "respondents, recruits, or anything else the goal does not name — those cost money and change",
-            "who is being studied. If the honest answer is that nothing has happened yet, that IS the",
-            "answer: mark done. Use only what is in this message; ignore any other project, panel or",
+            "who is being studied. Use only what is in this message; ignore any other project, panel or",
             "conversation you may remember from this account.",
+            // Only true when reading results, where "nobody has answered" is
+            // the answer. Applied to sending, it let "panel created — shall I
+            // send?" be marked done, and the round recorded as sent.
+            ...(nothingIsAnAnswer ? ["If the honest answer is that nothing has happened yet, that IS the answer: mark done."] : []),
             "",
             "You must reply with the JSON object below in every case, including when the goal is met.",
             "Do not summarise, do not answer in a sentence, do not add anything outside the braces.",
@@ -214,8 +217,10 @@ export class ResearchAgent {
           "low",
         );
       } catch (error) {
-        // The judge failed twice. Fall back on what can be read without it,
-        // rather than losing the whole run over one unparseable sentence.
+        // An empty budget is a stop, not a judge failure to paper over.
+        if (error instanceof BudgetExhausted) throw error;
+        // The judge failed (garbled twice, or timed out). Fall back on what
+        // can be read without it rather than losing the whole run.
         const confirming = asksToConfirm(said);
         verdict = {
           done: !confirming,
@@ -280,7 +285,12 @@ export class ResearchAgent {
     // task and survey ids come back), so the panel is given a unique name
     // when it is created and asked for by that name afterwards.
     let distributed = false;
-    if (this.send && this.emails.length > 0) {
+    if (this.send && this.emails.length > 0 && !published.live) {
+      // Emailing people a link to a survey that may not be live wastes their
+      // goodwill and the round. Say so and skip.
+      this.say?.("  not sending: the survey is not confirmed live");
+      await this.log?.({ type: "decision", stage: "skip-send", round: roundNumber, reason: "survey not confirmed live" });
+    } else if (this.send && this.emails.length > 0) {
       this.say?.(`  sending to ${this.emails.length} recipients…`);
       // A later round looks the panel up by name, but that lookup has never
       // been exercised on a real run — so it carries its own fallback. If the
@@ -311,7 +321,13 @@ export class ResearchAgent {
 
       // "Sent" is a claim that ends up in the write-up, so it has to be true.
       // The conversation ending is not evidence that mail went out.
-      distributed = sentFrom(sentReply).sent || this.lastExchangeDone;
+      // Only from what Flashpoint said. A judge's "done" once let "panel
+      // created, shall I send?" through as sent. If the two disagree, the
+      // reply wins and the disagreement goes in the log.
+      distributed = sentFrom(sentReply).sent;
+      if (!distributed && this.lastExchangeDone) {
+        await this.log?.({ type: "disagreement", round: roundNumber, note: "judge said done; reply does not say sent" });
+      }
       if (distributed) {
         this.panelCreated = true;
         this.say?.(`  sent (panel "${this.panelName}")`);
@@ -329,7 +345,7 @@ export class ResearchAgent {
       await sleep(waitMs);
     }
 
-    const { completes, analysis } = await this.collectAndRead(roundNumber);
+    const { completes, analysis } = await this.collectAndRead(roundNumber, this.history);
 
     const round = {
       round: roundNumber,
@@ -346,19 +362,19 @@ export class ResearchAgent {
   }
 
   /** Ask for the current survey's results and decide what they mean. */
-  async collectAndRead(roundNumber) {
+  async collectAndRead(roundNumber, earlier) {
     this.say?.("  collecting results…");
     const results = await this.converse(
       "Give me the results of this survey so far: every question, the counts and percentages for each answer, every free-text response, and the number of completes. If nobody has answered yet, say exactly that.",
       `collect the round ${roundNumber} results`,
-      { maxTurns: TURNS.collect, isDone: (reply) => resultsFrom(reply).answered },
+      { maxTurns: TURNS.collect, isDone: (reply) => resultsFrom(reply).answered, nothingIsAnAnswer: true },
     );
     const completes = completesFrom(results);
     if (completes !== null) this.say?.(`  ${completes} complete${completes === 1 ? "" : "s"}`);
 
     // The analysis reads what the surveys agent wrote, not its envelope, and
     // sees what earlier rounds found so it can say what this one changed.
-    const analysis = await this.brain.analyse(this.objective, roundNumber, textOf(results), this.history);
+    const analysis = await this.brain.analyse(this.objective, roundNumber, textOf(results), earlier);
     this.say?.(`  read them: ${analysis.reasoning}`);
     (analysis.findings ?? []).forEach((f) => this.say?.(`    • ${f}`));
     return { completes, analysis };
@@ -375,7 +391,10 @@ export class ResearchAgent {
     this.say?.(`  so the agent waits another ${Math.round(waitMs / 1000)}s and reads the same survey again.`);
     await this.log?.({ type: "decision", stage: "wait-again", round: round.round, reason: "zero completes" });
     await sleep(waitMs);
-    const { completes, analysis } = await this.collectAndRead(round.round);
+    const { completes, analysis } = await this.collectAndRead(
+      round.round,
+      this.history.filter((h) => h !== round),
+    );
     Object.assign(round, { completes, analysis, waited_twice: true });
     await this.log?.({ type: "round", ...round });
     return round;
@@ -385,22 +404,27 @@ export class ResearchAgent {
     const started = Date.now();
     this.say?.(`objective: ${this.objective}`);
     this.say?.(`reasoning with: ${this.brain.backend}`);
-    this.say?.(`budget: $${this.flashpoint.budgetUsd.toFixed(2)} · rounds: up to ${this.maxRounds} · send: ${this.send ? "yes" : "dry run"}`);
+    this.say?.(`budget: $${(this.flashpoint.budgetUsd + this.reserveUsd).toFixed(2)} · rounds: up to ${this.maxRounds} · send: ${this.send ? "yes" : "dry run"}`);
 
     let stopped = null;
     try {
       for (let r = 1; r <= this.maxRounds; r++) {
         let round = await this.runRound(r);
 
+        // Nothing sent means nobody was asked: there is nothing to follow up
+        // on, however Flashpoint reports the count. (Checking only for zero
+        // let a dry run whose reply gave no count go on to build round 2.)
+        if (!round.distributed) {
+          this.say?.("\n  nothing was sent, so there is nothing to follow up on.");
+          stopped = "not-sent";
+          break;
+        }
+
         // Zero answers is not a gap to follow up on; it is silence. Give
         // people one more window before deciding anything.
-        if (round.distributed && round.completes === 0) round = await this.waitAgain(round);
+        if (round.completes === 0) round = await this.waitAgain(round);
         if (round.completes === 0) {
-          this.say?.(
-            round.distributed
-              ? "\n  still no answers. There is nothing to follow up on, so no second survey goes out."
-              : "\n  nothing was sent, so there is nothing to follow up on.",
-          );
+          this.say?.("\n  still no answers. There is nothing to follow up on, so no second survey goes out.");
           stopped = "no-responses";
           break;
         }
@@ -424,6 +448,7 @@ export class ResearchAgent {
       await this.log?.({ type: "stopped", reason: stopped, message: error.message, stack: error.stack });
     }
 
+    this.flashpoint.budgetUsd += this.reserveUsd;
     this.say?.("\n── Recommendation ──");
     let recommendation = null;
     try {

@@ -98,7 +98,9 @@ export class FlashpointTimeout extends FlashpointError {}
 export function redact(args) {
   const scrub = (v) =>
     typeof v === "string"
-      ? v.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, (hit) => `<address at ${hit.split("@")[1]}>`)
+      ? // Any local part an address can have ("o'brien", "a%b"), but not the
+        // markdown around it: Flashpoint writes **someone@example.com**.
+        v.replace(/[^\s@<>()[\]",;:*`]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, (hit) => `<address at ${hit.split("@")[1]}>`)
       : v;
   const walk = (o) => {
     if (Array.isArray(o)) return o.map(walk);
@@ -264,6 +266,21 @@ export class Flashpoint {
       } catch {
         result = payload;
       }
+    }
+
+    // A tool can fail inside a successful response. In one dry run chat came
+    // back "Error executing tool chat: orchestrator did not reply within
+    // 300.0s" and was parsed as if it were an answer. It was still paid for —
+    // the charge above stands — but it is a failure, not a reply.
+    const failure =
+      message.result?.isError
+        ? String(payload ?? "tool reported an error")
+        : result && typeof result === "object" && (result.error || result.status === "failed")
+          ? String(result.error?.message ?? result.error ?? "tool reported status failed")
+          : null;
+    if (failure) {
+      await this.log?.({ type: "tool-error", tool: name, price, receipt, problem: failure.slice(0, 300) });
+      throw new FlashpointError(`${name} failed: ${failure.slice(0, 200)}`);
     }
 
     // The surveys agent echoes panel membership back at us, so a raw result

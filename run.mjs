@@ -4,7 +4,7 @@
 //   node run.mjs --objective "Figure out the best event to run next spring"
 //                --audience "Columbia undergraduates in the AI Club"
 //                --emails me@example.com,friend@example.com
-//                --rounds 2 --budget 8 --send
+//                --rounds 2 --budget 10 --send
 //
 // Without --send it does everything except put email in front of a human:
 // it still designs the survey, publishes it and pays for the calls.
@@ -14,6 +14,18 @@ import path from "node:path";
 import { ResearchAgent } from "./src/agent.mjs";
 import { renderRun } from "./src/report.mjs";
 import { balance, redact, wallet } from "./src/flashpoint.mjs";
+
+// .env.example tells people to put ANTHROPIC_API_KEY in .env, but only the
+// wallet key was ever read from it; the Claude backend silently stayed off.
+// Load every KEY=value line that the shell has not already set. Nothing here
+// is printed.
+const envFile = new URL("./.env", import.meta.url);
+if (fs.existsSync(envFile)) {
+  for (const line of fs.readFileSync(envFile, "utf8").split("\n")) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+  }
+}
 
 function args(argv) {
   const out = { _: [] };
@@ -48,13 +60,15 @@ flashpoint-agent — give it one objective, it does the research.
   --wait       <seconds>                        how long to wait for replies (default 120)
   --send                                        actually email people. Without it, a dry run.
 
-A round costs about $3 and at worst $5.63, so the default covers two rounds
-with room to spare. The cap is checked before every call: the agent stops and
-still writes its recommendation rather than overspending.
+Cost: the one measured round with a real send cost $4.09, so two rounds come
+to about $8-9; extra confirmations, a second wait or retries can push a round
+past $5. The cap is checked before every call and a few cents are held back
+for the recommendation, so the agent stops cleanly and still writes it rather
+than overspending.
 
 Dry run first. --send puts real mail in real inboxes and cannot be undone.
 `);
-  process.exit(a.objective ? 0 : 1);
+  process.exit(a.help === true || a.objective ? 0 : 1);
 }
 
 const emails = String(a.emails ?? "")
@@ -62,9 +76,33 @@ const emails = String(a.emails ?? "")
   .map((e) => e.trim())
   .filter((e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
 
-const budget = Number(a.budget ?? 10);
-const maxRounds = Number(a.rounds ?? 2);
-if (a.wait) process.env.WAIT_MS = String(Number(a.wait) * 1000);
+const dropped = String(a.emails ?? "").split(/[,\s]+/).filter((e) => e.trim()).length - emails.length;
+
+// A typo here used to be dangerous: "--budget 10usd" is NaN, and no price is
+// ever greater than NaN, so the spending cap silently never fired.
+function number(name, fallback, { min, max, integer = false }) {
+  const raw = a[name];
+  const n = raw === undefined ? fallback : Number(raw);
+  const bad = raw === true || !Number.isFinite(n) || n < min || n > max || (integer && !Number.isInteger(n));
+  if (bad) {
+    console.error(`  --${name} must be ${integer ? "a whole number" : "a number"} from ${min} to ${max} (got "${raw}").`);
+    process.exit(1);
+  }
+  return n;
+}
+const budget = number("budget", 10, { min: 0.1, max: 50 });
+const maxRounds = number("rounds", 2, { min: 1, max: 5, integer: true });
+const waitSeconds = number("wait", 120, { min: 0, max: 24 * 3600 });
+process.env.WAIT_MS = String(waitSeconds * 1000);
+
+// Fail on a missing key before a run folder exists, not after.
+let address;
+try {
+  address = wallet().address;
+} catch (error) {
+  console.error(`  ${error.message}`);
+  process.exit(1);
+}
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 const dir = path.join(path.dirname(new URL(import.meta.url).pathname), "runs", stamp);
@@ -82,7 +120,6 @@ const log = async (entry) => {
 };
 const say = (line) => console.log(redact(line));
 
-const address = wallet().address;
 let opening = null;
 try {
   opening = await balance();
@@ -96,6 +133,9 @@ say(`  wallet ${address}${opening === null ? "" : ` · ${opening.toFixed(2)} USD
 say(`  log: ${logPath}`);
 say("");
 
+if (dropped > 0) {
+  say(`  ${dropped} of the --emails did not look like addresses and were left out.`);
+}
 if (a.send && emails.length === 0) {
   say("  --send was passed but no valid --emails. Nothing would be sent; continuing as a dry run.");
 }
@@ -130,7 +170,7 @@ const agent = new ResearchAgent({
 const summary = await agent.run();
 await log({ type: "finish", ...summary });
 
-const md = renderRun({ summary, stamp, send: Boolean(a.send) });
+const md = renderRun({ summary, stamp, send: Boolean(a.send) && emails.length > 0 });
 
 fs.writeFileSync(path.join(dir, "RUN.md"), redact(md));
 stream.end();
